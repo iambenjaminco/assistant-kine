@@ -1,0 +1,354 @@
+{
+  "CA0a888954e2daa20c2e2623e5e7c5180c": {
+    "step": "MENU",
+    "flow": null,
+    "data": {},
+    "noInput": 0,
+    "noMatch": 0,
+    "lastPrompt": "Bonjour, vous êtes bien au Cabinet \"...\". Nous sommes actuellement en consultation. Je peux vous aider à prendre, modifier ou annuler un rendez-vous. Tapez 1 pour prise de rendez-vous. 2 pour modifier. 3 pour annuler. 4 pour informations.",
+    "history": [],
+    "createdAt": "2026-02-20T17:48:30.728Z",
+    "updatedAt": "2026-02-20T17:48:30.747Z"
+  },
+  "CA7491bd4baf7694a83a838c9f20489e27": {
+    "step": "ASK_INTENT",
+    "flow": null,
+    "data": {},
+    "noInput": 1,
+    "noMatch": 0,
+    "lastPrompt": "Bonjour, vous êtes bien au Cabinet \"...\". Nous sommes actuellement en consultation. Je peux vous aider à prendre, modifier ou annuler un rendez-vous. Comment puis-je vous aider ?",
+    "history": [],
+    "createdAt": "2026-02-20T21:46:56.689Z",
+    "updatedAt": "2026-02-20T21:47:34.450Z"
+  },
+  "CA8e08959ab023340e8623efe4790717a7": {
+    "step": "ASK_INTENT",
+    "flow": null,
+    "data": {},
+    "noInput": 1,
+    "noMatch": 0,
+    "lastPrompt": null,
+    "lastQuestion": "Comment puis-je vous aider ?",
+    "history": [],
+    "createdAt": "2026-02-20T23:13:24.076Z",
+    "updatedAt": "2026-02-20T23:13:28.233Z"
+  },
+  "CA1588c44471fb05a4375ec37ffb8117e0": {
+    "step": "ASK_INTENT",
+    "flow": null,
+    "data": {},
+    "noInput": 1,
+    "noMatch": 0,
+    "lastPrompt": null,
+    "lastQuestion": "Comment puis-je vous aider ?",
+    "history": [],
+    "createdAt": "2026-02-20T23:13:38.038Z",
+    "updatedAt": "2026-02-20T23:13:41.502Z"
+  },
+  "CA019695ce1b0632a1520b905be82edbac": {
+    "step": "BOOK_PRACTITIONER",
+    "flow": "BOOK",
+    "data": {
+      "isExisting": true
+    },
+    "noInput": 0,
+    "noMatch": 0,
+    "lastPrompt": "Je n'ai pas identifié le praticien. Lequel souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3.",
+    "lastQuestion": "Je n'ai pas identifié le praticien. Lequel souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3.",
+    "history": [
+      {
+        "flow": null,
+        "step": "ASK_INTENT",
+        "data": {},
+        "lastPrompt": null,
+        "lastQuestion": "Comment puis-je vous aider ?"
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_EXISTING",
+        "data": {},
+        "lastPrompt": "Très bien. Êtes-vous déjà patient du cabinet ?",
+        "lastQuestion": "Très bien. Êtes-vous déjà patient du cabinet ?"
+      }
+    ],
+    "createdAt": "2026-02-25T13:43:24.305Z",
+    "updatedAt": "2026-02-25T13:43:50.054Z"
+  },
+  "TEST300": {
+    "step": "BOOK_ALTS",
+    "flow": "BOOK",
+    "data": {
+      "isExisting": true,
+      "practitionerId": "1",
+      "practitionerName": "Praticien 1",
+      "dayName": "mardi",
+      "dateYmd": "2026-03-03"
+    },
+    "noInput": 0,
+    "noMatch": 0,
+    "lastPrompt": "Vous préférez un autre jour ou un autre praticien ?",
+    "lastQuestion": "Vous préférez un autre jour ou un autre praticien ?",
+    "history": [
+      {
+        "flow": null,
+        "step": "ASK_INTENT",
+        "data": {},
+        "lastPrompt": null,
+        "lastQuestion": "Comment puis-je vous aider ?"
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_EXISTING",
+        "data": {},
+        "lastPrompt": "Très bien. Êtes-vous déjà patient du cabinet ?",
+        "lastQuestion": "Très bien. Êtes-vous déjà patient du cabinet ?"
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_PRACTITIONER",
+        "data": {
+          "isExisting": true
+        },
+        "lastPrompt": "Quel praticien souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3.",
+        "lastQuestion": "Quel praticien souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3."
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_DAY",
+        "data": {
+          "isExisting": true,
+          "practitionerId": "1",
+          "practitionerName": "Praticien 1"
+        },
+        "lastPrompt": "Quel jour souhaitez-vous ?",
+        "lastQuestion": "Quel jour souhaitez-vous ?"
+      }
+    ],
+    "createdAt": "2026-02-25T22:19:23.731Z",
+    "updatedAt": "2026-02-25T22:19:23.970Z"
+  },
+  "TEST200": {
+    "step": "BOOK_ALTS",
+    "flow": "BOOK",
+    "data": {
+      "isExisting": true,
+      "practitionerId": "1",
+      "practitionerName": "Praticien 1",
+      "dayName": "mardi",
+      "dateYmd": "2026-03-03"
+    },
+    "noInput": 0,
+    "noMatch": 0,
+    "lastPrompt": "Vous préférez un autre jour ou un autre praticien ?",
+    "lastQuestion": "Vous préférez un autre jour ou un autre praticien ?",
+    "history": [
+      {
+        "flow": null,
+        "step": "ASK_INTENT",
+        "data": {},
+        "lastPrompt": null,
+        "lastQuestion": "Comment puis-je vous aider ?"
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_EXISTING",
+        "data": {},
+        "lastPrompt": "Très bien. Êtes-vous déjà patient du cabinet ?",
+        "lastQuestion": "Très bien. Êtes-vous déjà patient du cabinet ?"
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_PRACTITIONER",
+        "data": {
+          "isExisting": true
+        },
+        "lastPrompt": "Quel praticien souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3.",
+        "lastQuestion": "Quel praticien souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3."
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_DAY",
+        "data": {
+          "isExisting": true,
+          "practitionerId": "1",
+          "practitionerName": "Praticien 1"
+        },
+        "lastPrompt": "Quel jour souhaitez-vous ?",
+        "lastQuestion": "Quel jour souhaitez-vous ?"
+      }
+    ],
+    "createdAt": "2026-02-25T22:20:18.588Z",
+    "updatedAt": "2026-02-25T22:20:18.843Z"
+  },
+  "TEST400": {
+    "step": "CALLBACK_NAME",
+    "flow": "CALLBACK",
+    "data": {},
+    "noInput": 0,
+    "noMatch": 2,
+    "lastPrompt": "D'accord. Dites votre nom et prénom, et le cabinet vous rappellera.",
+    "lastQuestion": "D'accord. Dites votre nom et prénom, et le cabinet vous rappellera.",
+    "history": [
+      {
+        "flow": null,
+        "step": "ASK_INTENT",
+        "data": {},
+        "lastPrompt": "D'accord. Vous souhaitez prendre un rendez-vous, modifier un rendez-vous, annuler, ou obtenir une information ?",
+        "lastQuestion": "D'accord. Vous souhaitez prendre un rendez-vous, modifier un rendez-vous, annuler, ou obtenir une information ?"
+      }
+    ],
+    "createdAt": "2026-02-25T22:29:59.937Z",
+    "updatedAt": "2026-02-25T22:30:14.594Z"
+  },
+  "CAb1e2781cba6a794bf424fa1803e1a515": {
+    "step": "BOOK_PICK_SLOT",
+    "flow": "BOOK",
+    "data": {
+      "isExisting": true,
+      "practitionerId": "1",
+      "practitionerName": "Praticien 1",
+      "dayName": "vendredi",
+      "dateYmd": "2026-03-06",
+      "proposed": [
+        {
+          "dayName": "vendredi",
+          "time": "09:00"
+        },
+        {
+          "dayName": "vendredi",
+          "time": "13:15"
+        }
+      ]
+    },
+    "noInput": 0,
+    "noMatch": 0,
+    "lastPrompt": "Je vous propose Premier : vendredi à 9 heures. Deuxième : vendredi à 13 heures 15. Lequel vous convient ?",
+    "lastQuestion": "Je vous propose Premier : vendredi à 9 heures. Deuxième : vendredi à 13 heures 15. Lequel vous convient ?",
+    "history": [
+      {
+        "flow": null,
+        "step": "ASK_INTENT",
+        "data": {},
+        "lastPrompt": null,
+        "lastQuestion": "Comment puis-je vous aider ?"
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_EXISTING",
+        "data": {},
+        "lastPrompt": "Très bien. Êtes-vous déjà patient du cabinet ?",
+        "lastQuestion": "Très bien. Êtes-vous déjà patient du cabinet ?"
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_PRACTITIONER",
+        "data": {
+          "isExisting": true
+        },
+        "lastPrompt": "Je n'ai pas identifié le praticien. Lequel souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3.",
+        "lastQuestion": "Je n'ai pas identifié le praticien. Lequel souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3."
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_DAY",
+        "data": {
+          "isExisting": true,
+          "practitionerId": "1",
+          "practitionerName": "Praticien 1"
+        },
+        "lastPrompt": "Quel jour souhaitez-vous ?",
+        "lastQuestion": "Quel jour souhaitez-vous ?"
+      }
+    ],
+    "createdAt": "2026-02-28T10:37:44.909Z",
+    "updatedAt": "2026-02-28T10:40:09.609Z"
+  },
+  "CAd74217c8fa511726a2f26fa125c1fb8d": {
+    "step": "BOOK_DAY",
+    "flow": "BOOK",
+    "data": {
+      "isExisting": true,
+      "practitionerId": "2",
+      "practitionerName": "Praticien 2"
+    },
+    "noInput": 0,
+    "noMatch": 0,
+    "lastPrompt": "Quel jour souhaitez-vous ? Par exemple lundi ou mardi.",
+    "lastQuestion": "Quel jour souhaitez-vous ? Par exemple lundi ou mardi.",
+    "history": [
+      {
+        "flow": null,
+        "step": "ASK_INTENT",
+        "data": {},
+        "lastPrompt": null,
+        "lastQuestion": "Comment puis-je vous aider ?"
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_EXISTING",
+        "data": {},
+        "lastPrompt": "Très bien. Êtes-vous déjà patient du cabinet ?",
+        "lastQuestion": "Très bien. Êtes-vous déjà patient du cabinet ?"
+      },
+      {
+        "flow": "BOOK",
+        "step": "BOOK_PRACTITIONER",
+        "data": {
+          "isExisting": true
+        },
+        "lastPrompt": "Quel praticien souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3.",
+        "lastQuestion": "Quel praticien souhaitez-vous ? Praticien 1, Praticien 2, ou Praticien 3."
+      }
+    ],
+    "createdAt": "2026-02-28T10:40:52.705Z",
+    "updatedAt": "2026-02-28T10:41:39.597Z"
+  },
+  "CA4b4dcbc923856c52b3b66bf728b920ac": {
+    "step": "ASK_INTENT",
+    "flow": null,
+    "data": {},
+    "noInput": 1,
+    "noMatch": 0,
+    "lastPrompt": null,
+    "lastQuestion": "Comment puis-je vous aider ?",
+    "history": [],
+    "createdAt": "2026-02-28T10:52:13.523Z",
+    "updatedAt": "2026-02-28T10:53:29.429Z"
+  },
+  "CA84dbe6cd407bf514d3e2fba8b0454091": {
+    "step": "ASK_INTENT",
+    "flow": null,
+    "data": {},
+    "noInput": 0,
+    "noMatch": 0,
+    "lastPrompt": null,
+    "lastQuestion": "Comment puis-je vous aider ?",
+    "history": [],
+    "createdAt": "2026-02-28T11:01:37.722Z",
+    "updatedAt": "2026-02-28T11:01:37.728Z"
+  },
+  "CAe8573e04c699768d481412f0559e1e97": {
+    "step": "ASK_INTENT",
+    "flow": null,
+    "data": {},
+    "noInput": 1,
+    "noMatch": 0,
+    "lastPrompt": null,
+    "lastQuestion": "Comment puis-je vous aider ?",
+    "history": [],
+    "createdAt": "2026-02-28T21:17:51.337Z",
+    "updatedAt": "2026-02-28T21:21:54.767Z"
+  },
+  "CA021da9d4604db547c6978d0601eb7f92": {
+    "step": "ASK_INTENT",
+    "flow": null,
+    "data": {},
+    "noInput": 1,
+    "noMatch": 0,
+    "lastPrompt": null,
+    "lastQuestion": "Comment puis-je vous aider ?",
+    "history": [],
+    "createdAt": "2026-02-28T21:47:39.125Z",
+    "updatedAt": "2026-02-28T21:50:16.125Z"
+  }
+}
