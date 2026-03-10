@@ -1,3 +1,4 @@
+console.log("🔥 SRC/APP.JS CHARGÉ");
 const express = require("express");
 const calendarRoutes = require("./routes/calendar.routes");
 const twilioRoutes = require("./routes/twilio.routes");
@@ -24,10 +25,16 @@ app.use((req, res, next) => {
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    version: "debug-2",
+    routes: ["health", "test-direct", "api/calendar/test-google"]
+  });
+});
 
 app.get("/test-direct", (req, res) => {
-  res.json({ ok: true, message: "test direct ok" });
+  res.json({ ok: true, message: "test direct ok from src/app.js" });
 });
 
 app.use("/api/calendar", calendarRoutes);

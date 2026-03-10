@@ -1,3 +1,4 @@
+console.log("🔥 CALENDAR.ROUTES.JS CHARGÉ");
 // src/routes/calendar.routes.js
 const express = require("express");
 const { google } = require("googleapis");
