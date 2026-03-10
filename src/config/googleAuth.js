@@ -1,46 +1,30 @@
-const fs = require("fs");
-const path = require("path");
+// src/config/googleAuth.js
 const { google } = require("googleapis");
-const { authenticate } = require("@google-cloud/local-auth");
 const env = require("./env");
 
-const CREDENTIALS_PATH = path.join(process.cwd(), "credentials.json");
-const TOKEN_PATH = path.join(process.cwd(), "token.json");
-
-function loadToken() {
-  try {
-    return google.auth.fromJSON(JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8")));
-  } catch {
-    return null;
+function getPrivateKey() {
+  const key = process.env.GOOGLE_PRIVATE_KEY;
+  if (!key) {
+    throw new Error("GOOGLE_PRIVATE_KEY manquante dans les variables d'environnement.");
   }
-}
-
-function saveToken(client) {
-  const keys = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, "utf8"));
-  const key = keys.installed || keys.web;
-
-  fs.writeFileSync(
-    TOKEN_PATH,
-    JSON.stringify({
-      type: "authorized_user",
-      client_id: key.client_id,
-      client_secret: key.client_secret,
-      refresh_token: client.credentials.refresh_token,
-    })
-  );
+  return key.replace(/\\n/g, "\n");
 }
 
 async function getAuth() {
-  let client = loadToken();
-  if (client) return client;
+  const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
 
-  client = await authenticate({
+  if (!clientEmail) {
+    throw new Error("GOOGLE_CLIENT_EMAIL manquante dans les variables d'environnement.");
+  }
+
+  const auth = new google.auth.JWT({
+    email: clientEmail,
+    key: getPrivateKey(),
     scopes: env.scopes,
-    keyfilePath: CREDENTIALS_PATH,
   });
 
-  if (client.credentials.refresh_token) saveToken(client);
-  return client;
+  await auth.authorize();
+  return auth;
 }
 
 module.exports = { getAuth };

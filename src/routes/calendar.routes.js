@@ -1,109 +1,166 @@
 // src/routes/calendar.routes.js
 const express = require("express");
+const { google } = require("googleapis");
+const { getAuth } = require("../config/googleAuth");
 const {
-  createEvent,
-  updateEvent,
-  deleteEvent,
-  findAvailableSlots,
-  suggestTwoSlotsNext7Days
+  suggestTwoSlotsNext7Days,
+  findNextAppointmentSafe,
+  cancelAppointmentSafe,
+  bookAppointmentSafe,
 } = require("../services/calendar");
+const { CABINETS } = require("../config/cabinets");
 
 const router = express.Router();
 
-function toSafeError(err) {
-  const status = err?.code || err?.response?.status || 500;
-  const data = err?.response?.data || null;
-  const message = err?.message || "Unknown error";
-  return { status, message, data };
+function getCabinet() {
+  const cabinet = Object.values(CABINETS)[0];
+  if (!cabinet) {
+    throw new Error("Aucun cabinet configuré");
+  }
+  if (!cabinet.practitioners || !cabinet.practitioners.length) {
+    throw new Error("Aucun praticien configuré");
+  }
+  return cabinet;
 }
 
-// ✅ CREATE
-router.post("/events", async (req, res) => {
+// ✅ Test auth Google Calendar
+router.get("/test-google", async (req, res) => {
   try {
-    const { summary, description, startISO, endISO } = req.body;
+    const auth = await getAuth();
+    const calendar = google.calendar({ version: "v3", auth });
+    const result = await calendar.calendarList.list();
 
-    if (!summary || !startISO || !endISO) {
-      return res.status(400).json({ error: "summary, startISO, endISO requis" });
-    }
-
-    const out = await createEvent({ summary, description, startISO, endISO });
-    res.json(out);
+    return res.json({
+      ok: true,
+      calendars: (result.data.items || []).map((c) => ({
+        id: c.id,
+        summary: c.summary,
+        accessRole: c.accessRole,
+      })),
+    });
   } catch (err) {
-    const e = toSafeError(err);
-    res.status(e.status).json({ error: e.message, details: e.data });
+    console.error("TEST GOOGLE ERROR:", err);
+    return res.status(500).json({
+      ok: false,
+      message: err.message,
+      stack: err.stack,
+    });
   }
 });
 
-// ✅ UPDATE (PATCH)
-router.patch("/events/:id", async (req, res) => {
+// ✅ Test suggestions de créneaux
+router.get("/test-suggest", async (req, res) => {
   try {
-    const out = await updateEvent(req.params.id, req.body);
-    res.json(out);
-  } catch (err) {
-    const e = toSafeError(err);
-    res.status(e.status).json({ error: e.message, details: e.data });
-  }
-});
-
-// ✅ DELETE
-router.delete("/events/:id", async (req, res) => {
-  try {
-    const out = await deleteEvent(req.params.id);
-    res.json(out);
-  } catch (err) {
-    const e = toSafeError(err);
-    res.status(e.status).json({ error: e.message, details: e.data });
-  }
-});
-
-// ✅ AVAILABILITY (créneaux libres)
-router.get("/availability", async (req, res) => {
-  try {
-    const { date, limit, minutes } = req.query;
-
-  // 🔴 BLOQUER LES DATES PASSÉES
-const today = new Date();
-today.setHours(0, 0, 0, 0);
-
-const requested = new Date(date);
-requested.setHours(0, 0, 0, 0);
-
-if (requested < today) {
-  return res.status(400).json({
-    error: "La date demandée est déjà passée."
-  });
-}
-
-    console.log("✅ calendar.routes HIT query =", req.query);
-
-    const slots = await findAvailableSlots({
-      dateISO: date,
-      limit: limit ? parseInt(limit, 10) : 3,
-      slotMinutes: minutes ? parseInt(minutes, 10) : undefined,
+    const cabinet = getCabinet();
+    const result = await suggestTwoSlotsNext7Days({
+      practitioners: cabinet.practitioners,
     });
 
-    console.log("======== DEBUG SLOTS ========");
-console.log("RAW slots =", slots);
-console.log("Is array ?", Array.isArray(slots));
-console.log("First slot =", Array.isArray(slots) ? slots[0] : slots);
-console.log("Keys of first slot =", Array.isArray(slots) && slots[0] ? Object.keys(slots[0]) : null);
-console.log("================================");
-
-    res.json({ date, slots });
+    return res.json({
+      ok: true,
+      result,
+    });
   } catch (err) {
-    const e = toSafeError(err);
-    res.status(e.status).json({ error: e.message, details: e.data });
+    console.error("TEST SUGGEST ERROR:", err);
+    return res.status(500).json({
+      ok: false,
+      message: err.message,
+      stack: err.stack,
+    });
   }
 });
 
-// 🔥 Suggest 2 créneaux sur 7 jours
-router.get("/suggest", async (req, res) => {
+// ✅ Test recherche prochain RDV par téléphone
+router.get("/test-find-next", async (req, res) => {
   try {
-    const result = await suggestTwoSlotsNext7Days();
-    res.json(result);
+    const { phone } = req.query;
+    if (!phone) {
+      return res.status(400).json({
+        ok: false,
+        message: "Paramètre phone requis",
+      });
+    }
+
+    const cabinet = getCabinet();
+    const result = await findNextAppointmentSafe({
+      practitioners: cabinet.practitioners,
+      phone,
+    });
+
+    return res.json({
+      ok: true,
+      result,
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "suggest_failed" });
+    console.error("TEST FIND NEXT ERROR:", err);
+    return res.status(500).json({
+      ok: false,
+      message: err.message,
+      stack: err.stack,
+    });
+  }
+});
+
+// ✅ Test réservation manuelle
+router.post("/test-book", async (req, res) => {
+  try {
+    const { calendarId, patientName, startDate, endDate, phone } = req.body;
+
+    if (!calendarId || !startDate || !endDate) {
+      return res.status(400).json({
+        ok: false,
+        message: "calendarId, startDate et endDate requis",
+      });
+    }
+
+    const result = await bookAppointmentSafe({
+      calendarId,
+      patientName: patientName || "Patient test",
+      reason: "Rendez-vous kiné",
+      startDate,
+      endDate,
+      phone: phone || "",
+    });
+
+    return res.json({
+      ok: true,
+      result,
+    });
+  } catch (err) {
+    console.error("TEST BOOK ERROR:", err);
+    return res.status(500).json({
+      ok: false,
+      message: err.message,
+      stack: err.stack,
+    });
+  }
+});
+
+// ✅ Test annulation manuelle
+router.post("/test-cancel", async (req, res) => {
+  try {
+    const { calendarId, eventId } = req.body;
+
+    if (!calendarId || !eventId) {
+      return res.status(400).json({
+        ok: false,
+        message: "calendarId et eventId requis",
+      });
+    }
+
+    const result = await cancelAppointmentSafe({ calendarId, eventId });
+
+    return res.json({
+      ok: true,
+      result,
+    });
+  } catch (err) {
+    console.error("TEST CANCEL ERROR:", err);
+    return res.status(500).json({
+      ok: false,
+      message: err.message,
+      stack: err.stack,
+    });
   }
 });
 

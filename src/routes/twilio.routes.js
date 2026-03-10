@@ -19,14 +19,14 @@ const router = express.Router();
 // ⚠️ Session en mémoire (dev). Prod => Redis/DB
 const sessions = new Map();
 
-// ✅ Voix FR forcée partout
+// ✅ Voix FR configurable
 const SAY_OPTS = {
-  language: "fr-FR",
-  voice: "alice",
+  language: process.env.TWILIO_TTS_LANGUAGE || "fr-FR",
+  voice: process.env.TWILIO_TTS_VOICE || "alice",
 };
 
 function sayFr(node, text) {
-  node.say(SAY_OPTS, text);
+  node.say(SAY_OPTS, String(text || ""));
 }
 
 function safeCallSid(req) {
@@ -45,7 +45,7 @@ function getSession(callSid) {
       patientName: "",
       phone: "",
       pendingSlot: null,
-      foundEvent: null, // { calendarId, eventId, startISO, summary }
+      foundEvent: null, // { calendarId, eventId, startISO, summary, patientName? }
       createdAt: Date.now(),
       noInputCount: 0,
       retryCount: 0,
@@ -117,6 +117,7 @@ function pickChoiceFromSpeech(text, digits) {
   const t = normalizeText(text);
   if (/\b(premier|1|un)\b/.test(t) || /\ble 1\b/.test(t)) return 0;
   if (/\b(deuxieme|2|deux)\b/.test(t) || /\ble 2\b/.test(t)) return 1;
+
   return null;
 }
 
@@ -146,11 +147,13 @@ function cleanProposeSpeech(s) {
 
 function getCabinetOrFail(vr) {
   const cabinet = Object.values(CABINETS)[0];
+
   if (!cabinet) {
     sayFr(vr, "Configuration cabinet invalide.");
     vr.hangup();
     return null;
   }
+
   if (!cabinet.practitioners || !cabinet.practitioners.length) {
     sayFr(
       vr,
@@ -159,11 +162,16 @@ function getCabinetOrFail(vr) {
     sayGoodbye(vr);
     return null;
   }
+
   return cabinet;
 }
 
 function setPrompt(session, prompt) {
   session.lastPrompt = prompt || "";
+}
+
+function resetRetry(session) {
+  session.retryCount = 0;
 }
 
 function handleRetry(vr, res, session, callSid) {
@@ -189,6 +197,13 @@ router.post("/voice", async (req, res) => {
   const digits = (req.body?.Digits || "").trim();
 
   const session = getSession(callSid);
+
+  console.log("[TWILIO] /voice", {
+    callSid,
+    step: session.step,
+    speech,
+    digits,
+  });
 
   const cabinet = getCabinetOrFail(vr);
   if (!cabinet) {
@@ -241,7 +256,10 @@ router.post("/voice", async (req, res) => {
     }
   }
 
-  if (hasInput) session.noInputCount = 0;
+  if (hasInput) {
+    session.noInputCount = 0;
+    resetRetry(session);
+  }
 
   try {
     // =========================
@@ -314,18 +332,6 @@ router.post("/voice", async (req, res) => {
         return res.type("text/xml").send(vr.toString());
       }
 
-      if (text.includes("rendez") || text.includes("rdv")) {
-        setPrompt(
-          session,
-          PHRASES.askAction ||
-            "Voulez-vous prendre, modifier ou annuler un rendez-vous ?"
-        );
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Je n’ai pas compris votre demande.");
-        sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
-      }
-
       setPrompt(
         session,
         PHRASES.askAction ||
@@ -366,6 +372,8 @@ router.post("/voice", async (req, res) => {
     // A) PRENDRE RDV
     // =========================
     if (session.step === "BOOK_WELCOME") {
+      console.log("[TWILIO] BOOK_WELCOME -> suggestTwoSlotsNext7Days");
+
       const { slots, speech: proposeSpeech } = await suggestTwoSlotsNext7Days({
         practitioners: cabinet.practitioners,
       });
@@ -489,7 +497,6 @@ router.post("/voice", async (req, res) => {
         session.step = "BOOK_WELCOME";
         setPrompt(session, "");
         vr.redirect({ method: "POST" }, "/twilio/voice");
-
         return res.type("text/xml").send(vr.toString());
       }
 
@@ -505,6 +512,7 @@ router.post("/voice", async (req, res) => {
 
     if (session.step === "BOOK_ASK_NAME") {
       const name = (speech || "").trim();
+
       if (!name) {
         setPrompt(session, "Quel est votre nom et prénom ?");
         const g = gatherSpeech(vr, "/twilio/voice");
@@ -525,6 +533,7 @@ router.post("/voice", async (req, res) => {
 
     if (session.step === "BOOK_ASK_PHONE") {
       const phone = parsePhone(speech, digits);
+
       if (!phone) {
         setPrompt(session, "Dites votre numéro de téléphone, chiffre par chiffre.");
         const g = gatherSpeech(vr, "/twilio/voice");
@@ -544,6 +553,12 @@ router.post("/voice", async (req, res) => {
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
+
+      console.log("[TWILIO] BOOK_ASK_PHONE -> bookAppointmentSafe", {
+        calendarId: slot.calendarId,
+        patientName: session.patientName,
+        phone: session.phone,
+      });
 
       const result = await bookAppointmentSafe({
         calendarId: slot.calendarId,
@@ -677,6 +692,7 @@ router.post("/voice", async (req, res) => {
     // =========================
     if (session.step === "MODIFY_ASK_PHONE") {
       const phone = parsePhone(speech, digits);
+
       if (!phone) {
         setPrompt(session, "Dites votre numéro de téléphone, chiffre par chiffre.");
         const g = gatherSpeech(vr, "/twilio/voice");
@@ -684,6 +700,7 @@ router.post("/voice", async (req, res) => {
         sayFr(g, session.lastPrompt);
         return res.type("text/xml").send(vr.toString());
       }
+
       session.phone = phone;
       session.step = "MODIFY_FIND_APPT";
       setPrompt(session, "");
@@ -692,6 +709,10 @@ router.post("/voice", async (req, res) => {
     }
 
     if (session.step === "MODIFY_FIND_APPT") {
+      console.log("[TWILIO] MODIFY_FIND_APPT -> findNextAppointmentSafe", {
+        phone: session.phone,
+      });
+
       const found = await findNextAppointmentSafe({
         practitioners: cabinet.practitioners,
         phone: session.phone,
@@ -712,6 +733,7 @@ router.post("/voice", async (req, res) => {
       }
 
       session.foundEvent = found;
+      session.patientName = found.patientName || session.patientName || "Patient";
       session.step = "MODIFY_CONFIRM_FOUND";
 
       setPrompt(session, "Est-ce bien votre rendez-vous ?");
@@ -763,6 +785,11 @@ router.post("/voice", async (req, res) => {
         return res.type("text/xml").send(vr.toString());
       }
 
+      console.log("[TWILIO] MODIFY_CONFIRM_FOUND -> cancelAppointmentSafe", {
+        calendarId: found.calendarId,
+        eventId: found.eventId,
+      });
+
       await cancelAppointmentSafe({
         calendarId: found.calendarId,
         eventId: found.eventId,
@@ -775,6 +802,8 @@ router.post("/voice", async (req, res) => {
     }
 
     if (session.step === "MODIFY_PROPOSE_NEW") {
+      console.log("[TWILIO] MODIFY_PROPOSE_NEW -> suggestTwoSlotsNext7Days");
+
       const { slots, speech: proposeSpeech } = await suggestTwoSlotsNext7Days({
         practitioners: cabinet.practitioners,
       });
@@ -802,6 +831,7 @@ router.post("/voice", async (req, res) => {
 
       session.step = "MODIFY_PICK_NEW";
       setPrompt(session, "Vous préférez le premier ou le deuxième ?");
+
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, session.lastPrompt);
       return res.type("text/xml").send(vr.toString());
@@ -809,9 +839,11 @@ router.post("/voice", async (req, res) => {
 
     if (session.step === "MODIFY_PICK_NEW") {
       const choice = pickChoiceFromSpeech(speech, digits);
+
       if (choice === null) {
         const retry = handleRetry(vr, res, session, callSid);
         if (retry) return retry;
+
         setPrompt(session, "Premier ou deuxième ?");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
@@ -827,9 +859,15 @@ router.post("/voice", async (req, res) => {
         return res.type("text/xml").send(vr.toString());
       }
 
+      console.log("[TWILIO] MODIFY_PICK_NEW -> bookAppointmentSafe", {
+        calendarId: slot.calendarId,
+        patientName: session.patientName || "Patient",
+        phone: session.phone,
+      });
+
       const result = await bookAppointmentSafe({
         calendarId: slot.calendarId,
-        patientName: session.patientName,
+        patientName: session.patientName || "Patient",
         reason: "Rendez-vous kiné",
         startDate: slot.start,
         endDate: slot.end,
@@ -863,6 +901,7 @@ router.post("/voice", async (req, res) => {
     // =========================
     if (session.step === "CANCEL_ASK_PHONE") {
       const phone = parsePhone(speech, digits);
+
       if (!phone) {
         setPrompt(session, "Dites votre numéro de téléphone, chiffre par chiffre.");
         const g = gatherSpeech(vr, "/twilio/voice");
@@ -870,6 +909,7 @@ router.post("/voice", async (req, res) => {
         sayFr(g, session.lastPrompt);
         return res.type("text/xml").send(vr.toString());
       }
+
       session.phone = phone;
       session.step = "CANCEL_FIND_APPT";
       setPrompt(session, "");
@@ -878,6 +918,10 @@ router.post("/voice", async (req, res) => {
     }
 
     if (session.step === "CANCEL_FIND_APPT") {
+      console.log("[TWILIO] CANCEL_FIND_APPT -> findNextAppointmentSafe", {
+        phone: session.phone,
+      });
+
       const found = await findNextAppointmentSafe({
         practitioners: cabinet.practitioners,
         phone: session.phone,
@@ -949,6 +993,11 @@ router.post("/voice", async (req, res) => {
         return res.type("text/xml").send(vr.toString());
       }
 
+      console.log("[TWILIO] CANCEL_CONFIRM_FOUND -> cancelAppointmentSafe", {
+        calendarId: found.calendarId,
+        eventId: found.eventId,
+      });
+
       await cancelAppointmentSafe({
         calendarId: found.calendarId,
         eventId: found.eventId,
@@ -956,6 +1005,7 @@ router.post("/voice", async (req, res) => {
 
       session.step = "CANCEL_ASK_REBOOK";
       setPrompt(session, "Voulez-vous reprendre un rendez-vous ?");
+
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, "Votre rendez-vous est annulé.");
       sayFr(g, session.lastPrompt);
@@ -1004,7 +1054,13 @@ router.post("/voice", async (req, res) => {
     sayFr(g, session.lastPrompt);
     return res.type("text/xml").send(vr.toString());
   } catch (err) {
-    console.error("ERROR [TWILIO]", err);
+    console.error("ERROR [TWILIO]", {
+      message: err?.message,
+      stack: err?.stack,
+      step: session.step,
+      callSid,
+    });
+
     sayFr(
       vr,
       PHRASES.errorGeneric ||
