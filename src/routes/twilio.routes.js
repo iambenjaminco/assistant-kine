@@ -11,6 +11,12 @@ const {
   cancelAppointmentSafe,
 } = require("../services/calendar");
 
+const {
+  sendAppointmentConfirmationSMS,
+  sendAppointmentModifiedSMS,
+  sendAppointmentCancelledSMS,
+} = require("../services/sms");
+
 const { CABINETS } = require("../config/cabinets");
 const { PHRASES } = require("../../phrases.js");
 
@@ -577,6 +583,18 @@ router.post("/voice", async (req, res) => {
             slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
           }.`
         );
+
+        try {
+          await sendAppointmentConfirmationSMS({
+            to: session.phone,
+            patientName: session.patientName || "Patient",
+            formattedSlot: formatSlotFR(slot.start),
+            practitionerName: slot.practitionerName || "",
+          });
+        } catch (smsErr) {
+          console.error("SMS confirmation booking failed:", smsErr);
+        }
+
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
@@ -673,6 +691,18 @@ router.post("/voice", async (req, res) => {
             slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
           }.`
         );
+
+        try {
+          await sendAppointmentConfirmationSMS({
+            to: session.phone,
+            patientName: session.patientName || "Patient",
+            formattedSlot: formatSlotFR(slot.start),
+            practitionerName: slot.practitionerName || "",
+          });
+        } catch (smsErr) {
+          console.error("SMS confirmation alt booking failed:", smsErr);
+        }
+
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
@@ -882,6 +912,18 @@ router.post("/voice", async (req, res) => {
             slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
           }.`
         );
+
+        try {
+          await sendAppointmentModifiedSMS({
+            to: session.phone,
+            patientName: session.patientName || "Patient",
+            formattedSlot: formatSlotFR(slot.start),
+            practitionerName: slot.practitionerName || "",
+          });
+        } catch (smsErr) {
+          console.error("SMS confirmation modify failed:", smsErr);
+        }
+
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
@@ -1002,6 +1044,16 @@ router.post("/voice", async (req, res) => {
         calendarId: found.calendarId,
         eventId: found.eventId,
       });
+
+      try {
+        await sendAppointmentCancelledSMS({
+          to: session.phone,
+          patientName: session.patientName || "Patient",
+          formattedSlot: formatSlotFR(found.startISO),
+        });
+      } catch (smsErr) {
+        console.error("SMS confirmation cancel failed:", smsErr);
+      }
 
       session.step = "CANCEL_ASK_REBOOK";
       setPrompt(session, "Voulez-vous reprendre un rendez-vous ?");
