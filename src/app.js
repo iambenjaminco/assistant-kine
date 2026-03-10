@@ -1,4 +1,3 @@
-console.log("🔥 SRC/APP.JS CHARGÉ");
 const express = require("express");
 const calendarRoutes = require("./routes/calendar.routes");
 const twilioRoutes = require("./routes/twilio.routes");
