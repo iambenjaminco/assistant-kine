@@ -4,7 +4,6 @@ const twilioRoutes = require("./routes/twilio.routes");
 
 const app = express();
 
-// ===== Logger propre =====
 function pickCallSid(req) {
   return req.body?.CallSid || null;
 }
@@ -22,13 +21,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// ============================
-
-// ⚠️ Twilio envoie du x-www-form-urlencoded
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ ok: true }));
+
+app.get("/test-direct", (req, res) => {
+  res.json({ ok: true, message: "test direct ok" });
+});
 
 app.use("/api/calendar", calendarRoutes);
 app.use("/twilio", twilioRoutes);
