@@ -1,9 +1,12 @@
+// src/app.js
+
 const express = require("express");
 const calendarRoutes = require("./routes/calendar.routes");
 const twilioRoutes = require("./routes/twilio.routes");
 
 const app = express();
 
+// Logger simple
 function pickCallSid(req) {
   return req.body?.CallSid || null;
 }
@@ -21,21 +24,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// Middlewares
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+// Route santé serveur
 app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    version: "debug-2",
-    routes: ["health", "test-direct", "api/calendar/test-google"]
-  });
+  res.json({ ok: true });
 });
 
-app.get("/test-direct", (req, res) => {
-  res.json({ ok: true, message: "test direct ok from src/app.js" });
-});
-
+// Routes principales
 app.use("/api/calendar", calendarRoutes);
 app.use("/twilio", twilioRoutes);
 
