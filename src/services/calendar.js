@@ -142,6 +142,20 @@ function normalizePhone(s) {
   return (s || "").toString().replace(/\D/g, "");
 }
 
+function extractPatientNameFromEvent(ev) {
+  const description = ev?.description || "";
+  const lines = description.split("\n").map((line) => line.trim());
+
+  const patientLine = lines.find((line) =>
+    normalizeText(line).startsWith("patient :")
+  );
+
+  if (!patientLine) return null;
+
+  const patientName = patientLine.split(":").slice(1).join(":").trim();
+  return patientName || null;
+}
+
 // ✅ Création d'évènement Google Calendar
 async function createAppointment({
   calendarId = "primary",
@@ -354,10 +368,8 @@ async function suggestTwoSlotsFromDate({ practitioners, fromDate, days = 7 }) {
 // ✅ NOUVEAU : Recherche + annulation Google Calendar
 // ======================================================
 
-// Cherche le prochain RDV correspondant au patient.
-// Retour: null ou { calendarId, eventId, startISO }
 // Cherche le prochain RDV correspondant au téléphone.
-// Retour: null ou { calendarId, eventId, startISO, summary }
+// Retour: null ou { calendarId, eventId, startISO, summary, patientName }
 async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
   assertPractitioners(practitioners);
 
@@ -403,6 +415,7 @@ async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
         eventId: ev.id,
         startISO,
         summary,
+        patientName: extractPatientNameFromEvent(ev),
       };
 
       if (!best) {
@@ -424,6 +437,7 @@ async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
     eventId: best.eventId,
     startISO: best.startISO,
     summary: best.summary,
+    patientName: best.patientName,
   };
 }
 

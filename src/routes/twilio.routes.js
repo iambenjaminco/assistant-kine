@@ -180,10 +180,56 @@ function resetRetry(session) {
   session.retryCount = 0;
 }
 
-function handleRetry(vr, res, session, callSid) {
+function maskPhone(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.length <= 4) return digits;
+  return `${digits.slice(0, 2)}****${digits.slice(-2)}`;
+}
+
+function summarizeSlot(slot) {
+  if (!slot) return null;
+  return {
+    start: slot.start,
+    end: slot.end,
+    formattedStart: slot.start ? formatSlotFR(slot.start) : null,
+    practitionerName: slot.practitionerName || null,
+    calendarId: slot.calendarId || null,
+  };
+}
+
+function summarizeSlots(slots) {
+  return (slots || []).map(summarizeSlot);
+}
+
+function logInfo(event, data = {}) {
+  console.log(`[TWILIO][${event}]`, data);
+}
+
+function logWarn(event, data = {}) {
+  console.warn(`[TWILIO][${event}]`, data);
+}
+
+function logError(event, data = {}) {
+  console.error(`[TWILIO][${event}]`, data);
+}
+
+function handleRetry(vr, res, session, callSid, reason = "UNKNOWN") {
   session.retryCount = (session.retryCount || 0) + 1;
 
+  logWarn("MISUNDERSTOOD_RETRY", {
+    callSid,
+    step: session.step,
+    retryCount: session.retryCount,
+    reason,
+  });
+
   if (session.retryCount >= 2) {
+    logWarn("CALL_ENDED_MISUNDERSTOOD", {
+      callSid,
+      step: session.step,
+      reason,
+    });
     sayFr(vr, "Je n’arrive pas à comprendre votre réponse.");
     sayGoodbye(vr);
     clearSession(callSid);
@@ -204,15 +250,17 @@ router.post("/voice", async (req, res) => {
 
   const session = getSession(callSid);
 
-  console.log("[TWILIO] /voice", {
+  logInfo("VOICE_WEBHOOK", {
     callSid,
     step: session.step,
     speech,
     digits,
+    hasInput: Boolean(speech || digits),
   });
 
   const cabinet = getCabinetOrFail(vr);
   if (!cabinet) {
+    logError("CABINET_CONFIG_INVALID", { callSid });
     clearSession(callSid);
     return res.type("text/xml").send(vr.toString());
   }
@@ -228,6 +276,12 @@ router.post("/voice", async (req, res) => {
     session.step !== "ACTION_LISTEN" &&
     session.step !== "ACTION_WAIT"
   ) {
+    logInfo("RETURN_TO_MAIN_MENU", {
+      callSid,
+      previousStep: session.step,
+      speech,
+    });
+
     resetToMenu(session);
     setPrompt(
       session,
@@ -244,9 +298,20 @@ router.post("/voice", async (req, res) => {
   if (!hasInput && session.lastPrompt) {
     if (session.skipSilenceOnce) {
       session.skipSilenceOnce = false;
+      logInfo("SKIP_SILENCE_ONCE", {
+        callSid,
+        step: session.step,
+      });
     } else {
       if (typeof session.noInputCount !== "number") session.noInputCount = 0;
       session.noInputCount += 1;
+
+      logWarn("NO_INPUT", {
+        callSid,
+        step: session.step,
+        noInputCount: session.noInputCount,
+        lastPrompt: session.lastPrompt,
+      });
 
       if (session.noInputCount === 1) {
         const g = gatherSpeech(vr, "/twilio/voice");
@@ -254,6 +319,12 @@ router.post("/voice", async (req, res) => {
         sayFr(g, session.lastPrompt);
         return res.type("text/xml").send(vr.toString());
       }
+
+      logWarn("CALL_ENDED_NO_INPUT", {
+        callSid,
+        step: session.step,
+        noInputCount: session.noInputCount,
+      });
 
       sayFr(vr, "Je n’ai pas eu de réponse.");
       sayGoodbye(vr);
@@ -280,6 +351,13 @@ router.post("/voice", async (req, res) => {
           PHRASES.askAction ||
             "Voulez-vous prendre, modifier ou annuler un rendez-vous ?"
         );
+
+        logInfo("CALL_STARTED", {
+          callSid,
+          step: session.step,
+          voice: SAY_OPTS.voice,
+          language: SAY_OPTS.language,
+        });
 
         sayFr(
           vr,
@@ -314,6 +392,13 @@ router.post("/voice", async (req, res) => {
         text.includes("consult");
 
       if (wantsModify) {
+        logInfo("INTENT_DETECTED", {
+          callSid,
+          step: session.step,
+          intent: "MODIFY",
+          speech,
+        });
+
         session.step = "MODIFY_ASK_PHONE";
         setPrompt(session, "Quel est votre numéro de téléphone ?");
         const g = gatherSpeech(vr, "/twilio/voice");
@@ -323,6 +408,13 @@ router.post("/voice", async (req, res) => {
       }
 
       if (wantsCancel) {
+        logInfo("INTENT_DETECTED", {
+          callSid,
+          step: session.step,
+          intent: "CANCEL",
+          speech,
+        });
+
         session.step = "CANCEL_ASK_PHONE";
         setPrompt(session, "Quel est votre numéro de téléphone ?");
         const g = gatherSpeech(vr, "/twilio/voice");
@@ -332,11 +424,24 @@ router.post("/voice", async (req, res) => {
       }
 
       if (wantsBook) {
+        logInfo("INTENT_DETECTED", {
+          callSid,
+          step: session.step,
+          intent: "BOOK",
+          speech,
+        });
+
         session.step = "BOOK_WELCOME";
         setPrompt(session, "");
         vr.redirect({ method: "POST" }, "/twilio/voice");
         return res.type("text/xml").send(vr.toString());
       }
+
+      logWarn("INTENT_NOT_UNDERSTOOD", {
+        callSid,
+        step: session.step,
+        speech,
+      });
 
       setPrompt(
         session,
@@ -356,6 +461,12 @@ router.post("/voice", async (req, res) => {
           "Voulez-vous prendre, modifier ou annuler un rendez-vous ?"
       );
 
+      logInfo("ACTION_MENU_PROMPTED", {
+        callSid,
+        step: session.step,
+        prompt: session.lastPrompt,
+      });
+
       sayFr(vr, session.lastPrompt);
 
       session.noInputCount = 0;
@@ -370,6 +481,11 @@ router.post("/voice", async (req, res) => {
       session.step = "ACTION";
       session.noInputCount = 0;
 
+      logInfo("ACTION_MENU_LISTENING", {
+        callSid,
+        step: session.step,
+      });
+
       gatherSpeech(vr, "/twilio/voice");
       return res.type("text/xml").send(vr.toString());
     }
@@ -378,7 +494,10 @@ router.post("/voice", async (req, res) => {
     // A) PRENDRE RDV
     // =========================
     if (session.step === "BOOK_WELCOME") {
-      console.log("[TWILIO] BOOK_WELCOME -> suggestTwoSlotsNext7Days");
+      logInfo("BOOKING_SLOTS_LOOKUP_START", {
+        callSid,
+        practitionersCount: cabinet.practitioners.length,
+      });
 
       const { slots, speech: proposeSpeech } = await suggestTwoSlotsNext7Days({
         practitioners: cabinet.practitioners,
@@ -392,12 +511,25 @@ router.post("/voice", async (req, res) => {
         practitionerName: s.practitionerName || cabinet.practitioners[0].name,
       }));
 
+      logInfo("BOOKING_SLOTS_LOOKUP_RESULT", {
+        callSid,
+        count: session.slots.length,
+        slots: summarizeSlots(session.slots),
+      });
+
       if (!session.slots.length) {
         const msg =
           cleanProposeSpeech(proposeSpeech) ||
           PHRASES.noAvailability ||
           "Je n’ai pas de créneau disponible dans les prochains jours.";
+
+        logWarn("BOOKING_NO_AVAILABILITY", {
+          callSid,
+          practitionersCount: cabinet.practitioners.length,
+        });
+
         sayFr(vr, msg);
+        logInfo("CALL_ENDED_NO_AVAILABILITY", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
@@ -433,11 +565,23 @@ router.post("/voice", async (req, res) => {
         const a = session.slots?.[0];
         const b = session.slots?.[1] || session.slots?.[0];
 
+        logInfo("BOOKING_SLOT_REPEAT_REQUESTED", {
+          callSid,
+          speech,
+          slots: summarizeSlots([a, b]),
+        });
+
         if (!a) {
+          logError("BOOKING_REPEAT_NO_SLOTS_FOUND", {
+            callSid,
+            speech,
+          });
+
           sayFr(
             vr,
             "Je ne retrouve plus les créneaux proposés. Merci de rappeler le cabinet."
           );
+          logInfo("CALL_ENDED_MISSING_SLOTS", { callSid });
           sayGoodbye(vr);
           clearSession(callSid);
           return res.type("text/xml").send(vr.toString());
@@ -469,7 +613,18 @@ router.post("/voice", async (req, res) => {
         const a = session.slots?.[0];
         const b = session.slots?.[1] || session.slots?.[0];
 
+        logWarn("BOOKING_SLOT_SELECTION_FAILED", {
+          callSid,
+          speech,
+          digits,
+          slots: summarizeSlots([a, b]),
+        });
+
         if (!a) {
+          logWarn("BOOKING_RESTART_NO_SLOTS_IN_SESSION", {
+            callSid,
+          });
+
           session.step = "BOOK_WELCOME";
           setPrompt(session, "");
           sayFr(vr, "On recommence.");
@@ -494,7 +649,20 @@ router.post("/voice", async (req, res) => {
       }
 
       const slot = session.slots?.[choice];
+
+      logInfo("BOOKING_SLOT_SELECTED", {
+        callSid,
+        choice,
+        slot: summarizeSlot(slot),
+      });
+
       if (!slot || !slot.calendarId) {
+        logWarn("BOOKING_SELECTED_SLOT_INVALID", {
+          callSid,
+          choice,
+          slot: summarizeSlot(slot),
+        });
+
         sayFr(
           vr,
           "Ce créneau vient d’être pris. Je regarde d’autres disponibilités."
@@ -520,6 +688,11 @@ router.post("/voice", async (req, res) => {
       const name = (speech || "").trim();
 
       if (!name) {
+        logWarn("PATIENT_NAME_NOT_UNDERSTOOD", {
+          callSid,
+          speech,
+        });
+
         setPrompt(session, "Quel est votre nom et prénom ?");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
@@ -528,6 +701,12 @@ router.post("/voice", async (req, res) => {
       }
 
       session.patientName = name;
+
+      logInfo("PATIENT_NAME_CAPTURED", {
+        callSid,
+        patientName: session.patientName,
+      });
+
       session.step = "BOOK_ASK_PHONE";
 
       setPrompt(session, "Quel est votre numéro de téléphone ?");
@@ -541,6 +720,13 @@ router.post("/voice", async (req, res) => {
       const phone = parsePhone(speech, digits);
 
       if (!phone) {
+        logWarn("PHONE_NOT_UNDERSTOOD", {
+          callSid,
+          step: session.step,
+          speech,
+          digits,
+        });
+
         setPrompt(session, "Dites votre numéro de téléphone, chiffre par chiffre.");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
@@ -550,20 +736,34 @@ router.post("/voice", async (req, res) => {
 
       session.phone = phone;
 
+      logInfo("PHONE_CAPTURED", {
+        callSid,
+        phone: maskPhone(session.phone),
+      });
+
       const slot = session.pendingSlot;
       session.pendingSlot = null;
 
       if (!slot || !slot.calendarId) {
+        logError("BOOKING_PENDING_SLOT_MISSING", {
+          callSid,
+          patientName: session.patientName,
+          phone: maskPhone(session.phone),
+        });
+
         sayFr(vr, "Je ne retrouve plus le créneau sélectionné.");
+        logInfo("CALL_ENDED_MISSING_PENDING_SLOT", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
 
-      console.log("[TWILIO] BOOK_ASK_PHONE -> bookAppointmentSafe", {
+      logInfo("BOOKING_ATTEMPT", {
+        callSid,
         calendarId: slot.calendarId,
         patientName: session.patientName,
-        phone: session.phone,
+        phone: maskPhone(session.phone),
+        slot: summarizeSlot(slot),
       });
 
       const result = await bookAppointmentSafe({
@@ -573,6 +773,14 @@ router.post("/voice", async (req, res) => {
         startDate: slot.start,
         endDate: slot.end,
         phone: session.phone || "",
+      });
+
+      logInfo("BOOKING_RESULT", {
+        callSid,
+        ok: result.ok,
+        code: result.code || null,
+        eventId: result.event?.id || null,
+        slot: summarizeSlot(slot),
       });
 
       if (result.ok) {
@@ -585,15 +793,35 @@ router.post("/voice", async (req, res) => {
         );
 
         try {
-          await sendAppointmentConfirmationSMS({
+          const sms = await sendAppointmentConfirmationSMS({
             to: session.phone,
             patientName: session.patientName || "Patient",
             formattedSlot: formatSlotFR(slot.start),
             practitionerName: slot.practitionerName || "",
           });
+
+          logInfo("SMS_SENT", {
+            callSid,
+            type: "BOOK_CONFIRMATION",
+            to: maskPhone(session.phone),
+            sid: sms?.sid || null,
+            status: sms?.status || null,
+          });
         } catch (smsErr) {
-          console.error("SMS confirmation booking failed:", smsErr);
+          logError("SMS_FAILED", {
+            callSid,
+            type: "BOOK_CONFIRMATION",
+            to: maskPhone(session.phone),
+            message: smsErr?.message,
+          });
         }
+
+        logInfo("CALL_ENDED_BOOKING_CONFIRMED", {
+          callSid,
+          patientName: session.patientName,
+          phone: maskPhone(session.phone),
+          slot: summarizeSlot(slot),
+        });
 
         sayGoodbye(vr);
         clearSession(callSid);
@@ -617,11 +845,24 @@ router.post("/voice", async (req, res) => {
         practitionerName: s.practitionerName || cabinet.practitioners[0].name,
       }));
 
+      logInfo("BOOKING_ALT_SLOTS_PROPOSED", {
+        callSid,
+        previousSlot: summarizeSlot(slot),
+        resultCode: result.code || null,
+        count: session.slots.length,
+        slots: summarizeSlots(session.slots),
+      });
+
       if (!session.slots?.length) {
         sayFr(
           vr,
           `${statusMsg} Je n’ai pas d’autre créneau disponible rapidement. Merci de rappeler le cabinet.`
         );
+        logInfo("CALL_ENDED_NO_ALT_SLOTS", {
+          callSid,
+          previousSlot: summarizeSlot(slot),
+          resultCode: result.code || null,
+        });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
@@ -656,7 +897,7 @@ router.post("/voice", async (req, res) => {
       const choice = pickChoiceFromSpeech(speech, digits);
 
       if (choice === null) {
-        const retry = handleRetry(vr, res, session, callSid);
+        const retry = handleRetry(vr, res, session, callSid, "BOOK_PICK_ALT");
         if (retry) return retry;
 
         setPrompt(session, "Premier ou deuxième ?");
@@ -667,12 +908,34 @@ router.post("/voice", async (req, res) => {
       }
 
       const slot = session.slots?.[choice];
+
+      logInfo("BOOKING_ALT_SLOT_SELECTED", {
+        callSid,
+        choice,
+        slot: summarizeSlot(slot),
+      });
+
       if (!slot || !slot.calendarId) {
+        logWarn("BOOKING_ALT_SLOT_INVALID", {
+          callSid,
+          choice,
+          slot: summarizeSlot(slot),
+        });
+
         sayFr(vr, "Ce créneau n’est plus disponible pour le moment.");
+        logInfo("CALL_ENDED_ALT_SLOT_INVALID", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
+
+      logInfo("BOOKING_ALT_ATTEMPT", {
+        callSid,
+        calendarId: slot.calendarId,
+        patientName: session.patientName,
+        phone: maskPhone(session.phone),
+        slot: summarizeSlot(slot),
+      });
 
       const result = await bookAppointmentSafe({
         calendarId: slot.calendarId,
@@ -681,6 +944,14 @@ router.post("/voice", async (req, res) => {
         startDate: slot.start,
         endDate: slot.end,
         phone: session.phone || "",
+      });
+
+      logInfo("BOOKING_ALT_RESULT", {
+        callSid,
+        ok: result.ok,
+        code: result.code || null,
+        eventId: result.event?.id || null,
+        slot: summarizeSlot(slot),
       });
 
       if (result.ok) {
@@ -693,25 +964,52 @@ router.post("/voice", async (req, res) => {
         );
 
         try {
-          await sendAppointmentConfirmationSMS({
+          const sms = await sendAppointmentConfirmationSMS({
             to: session.phone,
             patientName: session.patientName || "Patient",
             formattedSlot: formatSlotFR(slot.start),
             practitionerName: slot.practitionerName || "",
           });
+
+          logInfo("SMS_SENT", {
+            callSid,
+            type: "BOOK_CONFIRMATION_ALT",
+            to: maskPhone(session.phone),
+            sid: sms?.sid || null,
+            status: sms?.status || null,
+          });
         } catch (smsErr) {
-          console.error("SMS confirmation alt booking failed:", smsErr);
+          logError("SMS_FAILED", {
+            callSid,
+            type: "BOOK_CONFIRMATION_ALT",
+            to: maskPhone(session.phone),
+            message: smsErr?.message,
+          });
         }
+
+        logInfo("CALL_ENDED_ALT_BOOKING_CONFIRMED", {
+          callSid,
+          patientName: session.patientName,
+          phone: maskPhone(session.phone),
+          slot: summarizeSlot(slot),
+        });
 
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
 
+      logError("BOOKING_ALT_UNCONFIRMED", {
+        callSid,
+        code: result.code || null,
+        slot: summarizeSlot(slot),
+      });
+
       sayFr(
         vr,
         "Désolé, je n’arrive pas à confirmer un rendez-vous pour le moment. Merci de rappeler le cabinet."
       );
+      logInfo("CALL_ENDED_ALT_BOOKING_FAILED", { callSid });
       sayGoodbye(vr);
       clearSession(callSid);
       return res.type("text/xml").send(vr.toString());
@@ -724,6 +1022,13 @@ router.post("/voice", async (req, res) => {
       const phone = parsePhone(speech, digits);
 
       if (!phone) {
+        logWarn("PHONE_NOT_UNDERSTOOD", {
+          callSid,
+          step: session.step,
+          speech,
+          digits,
+        });
+
         setPrompt(session, "Dites votre numéro de téléphone, chiffre par chiffre.");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
@@ -732,6 +1037,12 @@ router.post("/voice", async (req, res) => {
       }
 
       session.phone = phone;
+
+      logInfo("MODIFY_PHONE_CAPTURED", {
+        callSid,
+        phone: maskPhone(session.phone),
+      });
+
       session.step = "MODIFY_FIND_APPT";
       setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
@@ -739,8 +1050,10 @@ router.post("/voice", async (req, res) => {
     }
 
     if (session.step === "MODIFY_FIND_APPT") {
-      console.log("[TWILIO] MODIFY_FIND_APPT -> findNextAppointmentSafe", {
-        phone: session.phone,
+      logInfo("APPOINTMENT_LOOKUP_START", {
+        callSid,
+        mode: "MODIFY",
+        phone: maskPhone(session.phone),
       });
 
       const found = await findNextAppointmentSafe({
@@ -749,6 +1062,12 @@ router.post("/voice", async (req, res) => {
       });
 
       if (!found) {
+        logWarn("APPOINTMENT_NOT_FOUND", {
+          callSid,
+          mode: "MODIFY",
+          phone: maskPhone(session.phone),
+        });
+
         sayFr(
           vr,
           "Je ne retrouve pas votre rendez-vous avec ce numéro. Merci de rappeler votre numéro pour vérification."
@@ -764,6 +1083,21 @@ router.post("/voice", async (req, res) => {
 
       session.foundEvent = found;
       session.patientName = found.patientName || session.patientName || "Patient";
+
+      logInfo("APPOINTMENT_FOUND", {
+        callSid,
+        mode: "MODIFY",
+        phone: maskPhone(session.phone),
+        appointment: {
+          calendarId: found.calendarId,
+          eventId: found.eventId,
+          startISO: found.startISO,
+          formattedStart: formatSlotFR(found.startISO),
+          patientName: found.patientName || null,
+          summary: found.summary || "",
+        },
+      });
+
       session.step = "MODIFY_CONFIRM_FOUND";
 
       setPrompt(session, "Est-ce bien votre rendez-vous ?");
@@ -779,12 +1113,25 @@ router.post("/voice", async (req, res) => {
       const no = t.includes("non") || t.includes("no");
 
       if (!yes && !no) {
+        logWarn("YES_NO_NOT_UNDERSTOOD", {
+          callSid,
+          step: session.step,
+          speech,
+        });
+
         setPrompt(session, "Est-ce bien votre rendez-vous ?");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
         return res.type("text/xml").send(vr.toString());
       }
+
+      logInfo("APPOINTMENT_CONFIRMATION_RESPONSE", {
+        callSid,
+        mode: "MODIFY",
+        response: yes ? "YES" : "NO",
+        speech,
+      });
 
       if (no) {
         session.phone = "";
@@ -799,28 +1146,48 @@ router.post("/voice", async (req, res) => {
 
       const found = session.foundEvent;
       if (!found) {
+        logError("MODIFY_FOUND_EVENT_MISSING", {
+          callSid,
+        });
+
         sayFr(vr, "Je ne retrouve plus votre rendez-vous.");
+        logInfo("CALL_ENDED_MODIFY_MISSING_EVENT", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
 
       if (isLessThan24h(found.startISO)) {
+        logWarn("MODIFY_BLOCKED_LT24H", {
+          callSid,
+          appointmentStart: found.startISO,
+          formattedStart: formatSlotFR(found.startISO),
+        });
+
         sayFr(
           vr,
           "Votre rendez-vous est dans moins de vingt-quatre heures. Il n’est pas possible de le modifier automatiquement. Merci d’appeler le cabinet."
         );
+        logInfo("CALL_ENDED_MODIFY_LT24H", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
 
-      console.log("[TWILIO] MODIFY_CONFIRM_FOUND -> cancelAppointmentSafe", {
+      logInfo("MODIFY_CANCEL_OLD_APPOINTMENT_START", {
+        callSid,
+        calendarId: found.calendarId,
+        eventId: found.eventId,
+        appointmentStart: found.startISO,
+      });
+
+      await cancelAppointmentSafe({
         calendarId: found.calendarId,
         eventId: found.eventId,
       });
 
-      await cancelAppointmentSafe({
+      logInfo("MODIFY_CANCEL_OLD_APPOINTMENT_SUCCESS", {
+        callSid,
         calendarId: found.calendarId,
         eventId: found.eventId,
       });
@@ -832,7 +1199,10 @@ router.post("/voice", async (req, res) => {
     }
 
     if (session.step === "MODIFY_PROPOSE_NEW") {
-      console.log("[TWILIO] MODIFY_PROPOSE_NEW -> suggestTwoSlotsNext7Days");
+      logInfo("MODIFY_NEW_SLOTS_LOOKUP_START", {
+        callSid,
+        practitionersCount: cabinet.practitioners.length,
+      });
 
       const { slots, speech: proposeSpeech } = await suggestTwoSlotsNext7Days({
         practitioners: cabinet.practitioners,
@@ -845,11 +1215,18 @@ router.post("/voice", async (req, res) => {
         practitionerName: s.practitionerName || cabinet.practitioners[0].name,
       }));
 
+      logInfo("MODIFY_NEW_SLOTS_LOOKUP_RESULT", {
+        callSid,
+        count: session.slots.length,
+        slots: summarizeSlots(session.slots),
+      });
+
       if (!session.slots.length) {
         sayFr(
           vr,
           "J’ai bien annulé votre rendez-vous, mais je n’ai pas de nouveau créneau disponible. Merci d’appeler le cabinet."
         );
+        logWarn("MODIFY_NO_NEW_SLOTS_AFTER_CANCEL", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
@@ -871,7 +1248,7 @@ router.post("/voice", async (req, res) => {
       const choice = pickChoiceFromSpeech(speech, digits);
 
       if (choice === null) {
-        const retry = handleRetry(vr, res, session, callSid);
+        const retry = handleRetry(vr, res, session, callSid, "MODIFY_PICK_NEW");
         if (retry) return retry;
 
         setPrompt(session, "Premier ou deuxième ?");
@@ -882,17 +1259,33 @@ router.post("/voice", async (req, res) => {
       }
 
       const slot = session.slots?.[choice];
+
+      logInfo("MODIFY_NEW_SLOT_SELECTED", {
+        callSid,
+        choice,
+        slot: summarizeSlot(slot),
+      });
+
       if (!slot || !slot.calendarId) {
+        logWarn("MODIFY_NEW_SLOT_INVALID", {
+          callSid,
+          choice,
+          slot: summarizeSlot(slot),
+        });
+
         sayFr(vr, "Ce créneau n’est plus disponible pour le moment.");
+        logInfo("CALL_ENDED_MODIFY_INVALID_SLOT", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
 
-      console.log("[TWILIO] MODIFY_PICK_NEW -> bookAppointmentSafe", {
+      logInfo("MODIFY_BOOKING_ATTEMPT", {
+        callSid,
         calendarId: slot.calendarId,
         patientName: session.patientName || "Patient",
-        phone: session.phone,
+        phone: maskPhone(session.phone),
+        slot: summarizeSlot(slot),
       });
 
       const result = await bookAppointmentSafe({
@@ -902,6 +1295,14 @@ router.post("/voice", async (req, res) => {
         startDate: slot.start,
         endDate: slot.end,
         phone: session.phone || "",
+      });
+
+      logInfo("MODIFY_BOOKING_RESULT", {
+        callSid,
+        ok: result.ok,
+        code: result.code || null,
+        eventId: result.event?.id || null,
+        slot: summarizeSlot(slot),
       });
 
       if (result.ok) {
@@ -914,25 +1315,52 @@ router.post("/voice", async (req, res) => {
         );
 
         try {
-          await sendAppointmentModifiedSMS({
+          const sms = await sendAppointmentModifiedSMS({
             to: session.phone,
             patientName: session.patientName || "Patient",
             formattedSlot: formatSlotFR(slot.start),
             practitionerName: slot.practitionerName || "",
           });
+
+          logInfo("SMS_SENT", {
+            callSid,
+            type: "MODIFY_CONFIRMATION",
+            to: maskPhone(session.phone),
+            sid: sms?.sid || null,
+            status: sms?.status || null,
+          });
         } catch (smsErr) {
-          console.error("SMS confirmation modify failed:", smsErr);
+          logError("SMS_FAILED", {
+            callSid,
+            type: "MODIFY_CONFIRMATION",
+            to: maskPhone(session.phone),
+            message: smsErr?.message,
+          });
         }
+
+        logInfo("CALL_ENDED_MODIFY_CONFIRMED", {
+          callSid,
+          patientName: session.patientName,
+          phone: maskPhone(session.phone),
+          slot: summarizeSlot(slot),
+        });
 
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
 
+      logError("MODIFY_BOOKING_FAILED", {
+        callSid,
+        code: result.code || null,
+        slot: summarizeSlot(slot),
+      });
+
       sayFr(
         vr,
         "Désolé, je n’arrive pas à confirmer ce nouveau créneau. Merci de rappeler le cabinet."
       );
+      logInfo("CALL_ENDED_MODIFY_BOOKING_FAILED", { callSid });
       sayGoodbye(vr);
       clearSession(callSid);
       return res.type("text/xml").send(vr.toString());
@@ -945,6 +1373,13 @@ router.post("/voice", async (req, res) => {
       const phone = parsePhone(speech, digits);
 
       if (!phone) {
+        logWarn("PHONE_NOT_UNDERSTOOD", {
+          callSid,
+          step: session.step,
+          speech,
+          digits,
+        });
+
         setPrompt(session, "Dites votre numéro de téléphone, chiffre par chiffre.");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
@@ -953,6 +1388,12 @@ router.post("/voice", async (req, res) => {
       }
 
       session.phone = phone;
+
+      logInfo("CANCEL_PHONE_CAPTURED", {
+        callSid,
+        phone: maskPhone(session.phone),
+      });
+
       session.step = "CANCEL_FIND_APPT";
       setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
@@ -960,8 +1401,10 @@ router.post("/voice", async (req, res) => {
     }
 
     if (session.step === "CANCEL_FIND_APPT") {
-      console.log("[TWILIO] CANCEL_FIND_APPT -> findNextAppointmentSafe", {
-        phone: session.phone,
+      logInfo("APPOINTMENT_LOOKUP_START", {
+        callSid,
+        mode: "CANCEL",
+        phone: maskPhone(session.phone),
       });
 
       const found = await findNextAppointmentSafe({
@@ -970,6 +1413,12 @@ router.post("/voice", async (req, res) => {
       });
 
       if (!found) {
+        logWarn("APPOINTMENT_NOT_FOUND", {
+          callSid,
+          mode: "CANCEL",
+          phone: maskPhone(session.phone),
+        });
+
         sayFr(
           vr,
           "Je ne retrouve pas votre rendez-vous avec ce numéro. Merci de rappeler votre numéro pour vérification."
@@ -984,6 +1433,22 @@ router.post("/voice", async (req, res) => {
       }
 
       session.foundEvent = found;
+      session.patientName = found.patientName || session.patientName || "Patient";
+
+      logInfo("APPOINTMENT_FOUND", {
+        callSid,
+        mode: "CANCEL",
+        phone: maskPhone(session.phone),
+        appointment: {
+          calendarId: found.calendarId,
+          eventId: found.eventId,
+          startISO: found.startISO,
+          formattedStart: formatSlotFR(found.startISO),
+          patientName: found.patientName || null,
+          summary: found.summary || "",
+        },
+      });
+
       session.step = "CANCEL_CONFIRM_FOUND";
 
       setPrompt(session, "Est-ce bien votre rendez-vous ?");
@@ -999,12 +1464,25 @@ router.post("/voice", async (req, res) => {
       const no = t.includes("non") || t.includes("no");
 
       if (!yes && !no) {
+        logWarn("YES_NO_NOT_UNDERSTOOD", {
+          callSid,
+          step: session.step,
+          speech,
+        });
+
         setPrompt(session, "Est-ce bien votre rendez-vous ?");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
         return res.type("text/xml").send(vr.toString());
       }
+
+      logInfo("APPOINTMENT_CONFIRMATION_RESPONSE", {
+        callSid,
+        mode: "CANCEL",
+        response: yes ? "YES" : "NO",
+        speech,
+      });
 
       if (no) {
         session.phone = "";
@@ -1019,25 +1497,39 @@ router.post("/voice", async (req, res) => {
 
       const found = session.foundEvent;
       if (!found) {
+        logError("CANCEL_FOUND_EVENT_MISSING", {
+          callSid,
+        });
+
         sayFr(vr, "Je ne retrouve plus votre rendez-vous.");
+        logInfo("CALL_ENDED_CANCEL_MISSING_EVENT", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
 
       if (isLessThan24h(found.startISO)) {
+        logWarn("CANCEL_BLOCKED_LT24H", {
+          callSid,
+          appointmentStart: found.startISO,
+          formattedStart: formatSlotFR(found.startISO),
+        });
+
         sayFr(
           vr,
           "Votre rendez-vous est dans moins de vingt-quatre heures. Il n’est pas possible de l’annuler automatiquement. Merci d’appeler le cabinet."
         );
+        logInfo("CALL_ENDED_CANCEL_LT24H", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
       }
 
-      console.log("[TWILIO] CANCEL_CONFIRM_FOUND -> cancelAppointmentSafe", {
+      logInfo("CANCEL_APPOINTMENT_START", {
+        callSid,
         calendarId: found.calendarId,
         eventId: found.eventId,
+        appointmentStart: found.startISO,
       });
 
       await cancelAppointmentSafe({
@@ -1045,14 +1537,33 @@ router.post("/voice", async (req, res) => {
         eventId: found.eventId,
       });
 
+      logInfo("CANCEL_APPOINTMENT_SUCCESS", {
+        callSid,
+        calendarId: found.calendarId,
+        eventId: found.eventId,
+      });
+
       try {
-        await sendAppointmentCancelledSMS({
+        const sms = await sendAppointmentCancelledSMS({
           to: session.phone,
           patientName: session.patientName || "Patient",
           formattedSlot: formatSlotFR(found.startISO),
         });
+
+        logInfo("SMS_SENT", {
+          callSid,
+          type: "CANCEL_CONFIRMATION",
+          to: maskPhone(session.phone),
+          sid: sms?.sid || null,
+          status: sms?.status || null,
+        });
       } catch (smsErr) {
-        console.error("SMS confirmation cancel failed:", smsErr);
+        logError("SMS_FAILED", {
+          callSid,
+          type: "CANCEL_CONFIRMATION",
+          to: maskPhone(session.phone),
+          message: smsErr?.message,
+        });
       }
 
       session.step = "CANCEL_ASK_REBOOK";
@@ -1070,6 +1581,12 @@ router.post("/voice", async (req, res) => {
       const no = t.includes("non") || t.includes("no");
 
       if (!yes && !no) {
+        logWarn("YES_NO_NOT_UNDERSTOOD", {
+          callSid,
+          step: session.step,
+          speech,
+        });
+
         setPrompt(session, "Voulez-vous reprendre un rendez-vous ?");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
@@ -1077,8 +1594,15 @@ router.post("/voice", async (req, res) => {
         return res.type("text/xml").send(vr.toString());
       }
 
+      logInfo("REBOOK_RESPONSE", {
+        callSid,
+        response: yes ? "YES" : "NO",
+        speech,
+      });
+
       if (no) {
         sayFr(vr, "Très bien.");
+        logInfo("CALL_ENDED_AFTER_CANCEL_NO_REBOOK", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
         return res.type("text/xml").send(vr.toString());
@@ -1093,8 +1617,15 @@ router.post("/voice", async (req, res) => {
     // =========================
     // Fallback
     // =========================
-    const retry = handleRetry(vr, res, session, callSid);
+    const retry = handleRetry(vr, res, session, callSid, "FALLBACK");
     if (retry) return retry;
+
+    logWarn("FALLBACK_NOT_UNDERSTOOD", {
+      callSid,
+      step: session.step,
+      speech,
+      digits,
+    });
 
     setPrompt(
       session,
@@ -1106,11 +1637,13 @@ router.post("/voice", async (req, res) => {
     sayFr(g, session.lastPrompt);
     return res.type("text/xml").send(vr.toString());
   } catch (err) {
-    console.error("ERROR [TWILIO]", {
+    logError("UNEXPECTED_ERROR", {
       message: err?.message,
       stack: err?.stack,
       step: session.step,
       callSid,
+      phone: maskPhone(session.phone),
+      patientName: session.patientName || "",
     });
 
     sayFr(
