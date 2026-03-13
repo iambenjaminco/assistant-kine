@@ -27,8 +27,8 @@ const sessions = new Map();
 
 // ✅ Voix FR configurable
 const SAY_OPTS = {
-  language: process.env.TWILIO_TTS_LANGUAGE || "fr-FR",
-  voice: process.env.TWILIO_TTS_VOICE || "alice",
+  language: "fr-FR",
+  voice: "Polly.Celine",
 };
 
 function sayFr(node, text) {
