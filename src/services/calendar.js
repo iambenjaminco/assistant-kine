@@ -87,6 +87,7 @@ function generateCandidateSlots(startDate, days = 7) {
       }
     }
   }
+
   return slots;
 }
 
@@ -125,6 +126,7 @@ async function getBusyPeriods(calendar, calendarId, timeMin, timeMax) {
       items: [{ id: calendarId }],
     },
   });
+
   const cal = res.data.calendars?.[calendarId];
   return cal?.busy ?? [];
 }
@@ -163,7 +165,7 @@ async function createAppointment({
   reason = "Rendez-vous kiné",
   startDate,
   endDate,
-  phone, // ✅ optionnel
+  phone,
 }) {
   const calendar = await getCalendarClient();
 
@@ -175,7 +177,6 @@ async function createAppointment({
     `Patient : ${patientName || "Patient"}`,
     ...(phone ? [`Téléphone : ${phone}`] : []),
     "Origine : Assistant vocal",
-    "Note : rappeler le client",
   ];
 
   const description = lines.join("\n");
@@ -226,7 +227,7 @@ async function bookAppointmentSafe({
   reason,
   startDate,
   endDate,
-  phone, // ✅ optionnel
+  phone,
 }) {
   const key = lockKey(calendarId, startDate, endDate);
 
@@ -253,13 +254,14 @@ async function bookAppointmentSafe({
 }
 
 // ======================================================
-// ✅ NOUVEAU : Suggestions multi-praticiens (practitioners[])
+// ✅ Suggestions multi-praticiens
 // ======================================================
 
 function assertPractitioners(practitioners) {
   if (!Array.isArray(practitioners) || practitioners.length === 0) {
     throw new Error("practitioners requis (tableau non vide)");
   }
+
   for (const p of practitioners) {
     if (!p.calendarId) throw new Error("practitioner.calendarId manquant");
     if (!p.name) throw new Error("practitioner.name manquant");
@@ -276,15 +278,18 @@ async function suggestTwoSlotsNext7Days({ practitioners, days = 7 }) {
   const timeMax = new Date(now);
   timeMax.setDate(timeMax.getDate() + days);
 
-  // Busy par praticien
   const busyByCal = {};
   for (const p of practitioners) {
-    busyByCal[p.calendarId] = await getBusyPeriods(calendar, p.calendarId, timeMin, timeMax);
+    busyByCal[p.calendarId] = await getBusyPeriods(
+      calendar,
+      p.calendarId,
+      timeMin,
+      timeMax
+    );
   }
 
   const candidates = generateCandidateSlots(now, days);
 
-  // délai mini avant un RDV (évite "tout de suite")
   const minLeadMinutes = 60;
   const cutoff = new Date(now);
   cutoff.setMinutes(cutoff.getMinutes() + minLeadMinutes);
@@ -293,7 +298,6 @@ async function suggestTwoSlotsNext7Days({ practitioners, days = 7 }) {
   for (const c of candidates) {
     if (c.start < cutoff) continue;
 
-    // cherche un praticien dispo pour ce slot
     for (const p of practitioners) {
       const busy = busyByCal[p.calendarId] || [];
       if (!isSlotBusy(c.start, c.end, busy)) {
@@ -303,7 +307,7 @@ async function suggestTwoSlotsNext7Days({ practitioners, days = 7 }) {
           calendarId: p.calendarId,
           practitionerName: p.name,
         });
-        break; // on prend le premier praticien dispo sur ce slot
+        break;
       }
     }
 
@@ -321,7 +325,7 @@ async function suggestTwoSlotsNext7Days({ practitioners, days = 7 }) {
         } ou ${formatSlotFR(b.start)}${
           b.practitionerName ? ` avec ${b.practitionerName}` : ""
         }.`
-      : `Je n’ai pas de créneau disponible sur les 7 prochains jours.`,
+      : "Je n’ai pas de créneau disponible sur les 7 prochains jours.",
   };
 }
 
@@ -336,7 +340,12 @@ async function suggestTwoSlotsFromDate({ practitioners, fromDate, days = 7 }) {
 
   const busyByCal = {};
   for (const p of practitioners) {
-    busyByCal[p.calendarId] = await getBusyPeriods(calendar, p.calendarId, start, timeMax);
+    busyByCal[p.calendarId] = await getBusyPeriods(
+      calendar,
+      p.calendarId,
+      start,
+      timeMax
+    );
   }
 
   const candidates = generateCandidateSlots(start, days);
@@ -365,7 +374,7 @@ async function suggestTwoSlotsFromDate({ practitioners, fromDate, days = 7 }) {
 }
 
 // ======================================================
-// ✅ NOUVEAU : Recherche + annulation Google Calendar
+// ✅ Recherche + annulation Google Calendar
 // ======================================================
 
 // Cherche le prochain RDV correspondant au téléphone.
@@ -441,7 +450,38 @@ async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
   };
 }
 
-// Annule / supprime un évènement
+// ✅ Ajoute une note interne sur un RDV précis
+async function addCallbackNoteToEvent({ calendarId, eventId }) {
+  const calendar = await getCalendarClient();
+
+  const { data: ev } = await calendar.events.get({
+    calendarId,
+    eventId,
+  });
+
+  const currentDescription = String(ev.description || "");
+  const note = "Note : rappeler le client";
+
+  if (currentDescription.includes(note)) {
+    return { ok: true, alreadyPresent: true };
+  }
+
+  const updatedDescription = currentDescription
+    ? `${currentDescription}\n${note}`
+    : note;
+
+  await calendar.events.patch({
+    calendarId,
+    eventId,
+    requestBody: {
+      description: updatedDescription,
+    },
+  });
+
+  return { ok: true, alreadyPresent: false };
+}
+
+// ✅ Annule / supprime un évènement
 async function cancelAppointmentSafe({ calendarId, eventId }) {
   const calendar = await getCalendarClient();
   await calendar.events.delete({
@@ -452,17 +492,13 @@ async function cancelAppointmentSafe({ calendarId, eventId }) {
 }
 
 module.exports = {
-  // existing
   createAppointment,
   formatSlotFR,
   isSlotAvailable,
   bookAppointmentSafe,
-
-  // updated multi-practitioners
   suggestTwoSlotsNext7Days,
   suggestTwoSlotsFromDate,
-
-  // new
   findNextAppointmentSafe,
+  addCallbackNoteToEvent,
   cancelAppointmentSafe,
 };
