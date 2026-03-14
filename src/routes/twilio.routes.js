@@ -28,7 +28,7 @@ const sessions = new Map();
 // ✅ Voix FR configurable
 const SAY_OPTS = {
   language: "fr-FR",
-  voice: "Polly.Celine",
+  voice: "Polly.Mathieu",
 };
 
 function sayFr(node, text) {
