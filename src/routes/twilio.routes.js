@@ -26,13 +26,22 @@ const router = express.Router();
 const sessions = new Map();
 
 // ✅ Voix FR configurable
+// Test avec Google Wavenet, souvent plus fiable que Polly sur <Say>
 const SAY_OPTS = {
   language: "fr-FR",
-  voice: "Polly.Mathieu",
+  voice: "Google.fr-FR-Wavenet-A",
 };
 
 function sayFr(node, text) {
-  node.say(SAY_OPTS, String(text || ""));
+  const safeText = String(text || "").trim();
+
+  console.log("[TWILIO][TTS_DEBUG]", {
+    voice: SAY_OPTS.voice,
+    language: SAY_OPTS.language,
+    text: safeText,
+  });
+
+  node.say(SAY_OPTS, safeText || "...");
 }
 
 function safeCallSid(req) {
@@ -214,6 +223,12 @@ function logError(event, data = {}) {
   console.error(`[TWILIO][${event}]`, data);
 }
 
+function sendTwiml(res, vr) {
+  const xml = vr.toString();
+  console.log("[TWILIO][TWIML_XML]", xml);
+  return res.type("text/xml").send(xml);
+}
+
 function handleRetry(vr, res, session, callSid, reason = "UNKNOWN") {
   session.retryCount = (session.retryCount || 0) + 1;
 
@@ -233,7 +248,7 @@ function handleRetry(vr, res, session, callSid, reason = "UNKNOWN") {
     sayFr(vr, "Je n’arrive pas à comprendre votre réponse.");
     sayGoodbye(vr);
     clearSession(callSid);
-    return res.type("text/xml").send(vr.toString());
+    return sendTwiml(res, vr);
   }
 
   return null;
@@ -262,7 +277,7 @@ router.post("/voice", async (req, res) => {
   if (!cabinet) {
     logError("CABINET_CONFIG_INVALID", { callSid });
     clearSession(callSid);
-    return res.type("text/xml").send(vr.toString());
+    return sendTwiml(res, vr);
   }
 
   const hasInput = Boolean(speech || digits);
@@ -292,7 +307,7 @@ router.post("/voice", async (req, res) => {
     const g = gatherSpeech(vr, "/twilio/voice");
     sayFr(g, "Très bien, retour au menu principal.");
     sayFr(g, session.lastPrompt);
-    return res.type("text/xml").send(vr.toString());
+    return sendTwiml(res, vr);
   }
 
   if (!hasInput && session.lastPrompt) {
@@ -317,7 +332,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Vous êtes toujours là ?");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logWarn("CALL_ENDED_NO_INPUT", {
@@ -329,7 +344,7 @@ router.post("/voice", async (req, res) => {
       sayFr(vr, "Je n’ai pas eu de réponse.");
       sayGoodbye(vr);
       clearSession(callSid);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
   }
 
@@ -370,7 +385,7 @@ router.post("/voice", async (req, res) => {
         session.step = "ACTION_LISTEN";
 
         vr.redirect({ method: "POST" }, "/twilio/voice");
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       const wantsModify =
@@ -404,7 +419,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Très bien.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       if (wantsCancel) {
@@ -420,7 +435,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "D’accord.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       if (wantsBook) {
@@ -434,7 +449,7 @@ router.post("/voice", async (req, res) => {
         session.step = "BOOK_WELCOME";
         setPrompt(session, "");
         vr.redirect({ method: "POST" }, "/twilio/voice");
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logWarn("INTENT_NOT_UNDERSTOOD", {
@@ -451,7 +466,7 @@ router.post("/voice", async (req, res) => {
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, "Désolé, je n’ai pas compris.");
       sayFr(g, session.lastPrompt);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "ACTION_LISTEN") {
@@ -474,7 +489,7 @@ router.post("/voice", async (req, res) => {
       session.step = "ACTION_WAIT";
 
       vr.redirect({ method: "POST" }, "/twilio/voice");
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "ACTION_WAIT") {
@@ -487,7 +502,7 @@ router.post("/voice", async (req, res) => {
       });
 
       gatherSpeech(vr, "/twilio/voice");
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     // =========================
@@ -532,7 +547,7 @@ router.post("/voice", async (req, res) => {
         logInfo("CALL_ENDED_NO_AVAILABILITY", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       sayFr(
@@ -548,7 +563,7 @@ router.post("/voice", async (req, res) => {
 
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, session.lastPrompt);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "BOOK_PICK_SLOT") {
@@ -584,7 +599,7 @@ router.post("/voice", async (req, res) => {
           logInfo("CALL_ENDED_MISSING_SLOTS", { callSid });
           sayGoodbye(vr);
           clearSession(callSid);
-          return res.type("text/xml").send(vr.toString());
+          return sendTwiml(res, vr);
         }
 
         sayFr(vr, "Je répète.");
@@ -604,7 +619,7 @@ router.post("/voice", async (req, res) => {
         setPrompt(session, "Vous préférez le premier ou le deuxième ?");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       const choice = pickChoiceFromSpeech(speech, digits);
@@ -629,7 +644,7 @@ router.post("/voice", async (req, res) => {
           setPrompt(session, "");
           sayFr(vr, "On recommence.");
           vr.redirect({ method: "POST" }, "/twilio/voice");
-          return res.type("text/xml").send(vr.toString());
+          return sendTwiml(res, vr);
         }
 
         sayFr(vr, "Je n’ai pas compris.");
@@ -645,7 +660,7 @@ router.post("/voice", async (req, res) => {
         setPrompt(session, "Premier ou deuxième ?");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       const slot = session.slots?.[choice];
@@ -671,7 +686,7 @@ router.post("/voice", async (req, res) => {
         session.step = "BOOK_WELCOME";
         setPrompt(session, "");
         vr.redirect({ method: "POST" }, "/twilio/voice");
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       session.pendingSlot = slot;
@@ -681,7 +696,7 @@ router.post("/voice", async (req, res) => {
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, "Très bien.");
       sayFr(g, session.lastPrompt);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "BOOK_ASK_NAME") {
@@ -697,7 +712,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       session.patientName = name;
@@ -713,7 +728,7 @@ router.post("/voice", async (req, res) => {
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, "Merci.");
       sayFr(g, session.lastPrompt);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "BOOK_ASK_PHONE") {
@@ -731,7 +746,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       session.phone = phone;
@@ -755,7 +770,7 @@ router.post("/voice", async (req, res) => {
         logInfo("CALL_ENDED_MISSING_PENDING_SLOT", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logInfo("BOOKING_ATTEMPT", {
@@ -825,7 +840,7 @@ router.post("/voice", async (req, res) => {
 
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       const statusMsg =
@@ -865,7 +880,7 @@ router.post("/voice", async (req, res) => {
         });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       const a = session.slots[0];
@@ -890,7 +905,7 @@ router.post("/voice", async (req, res) => {
 
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, session.lastPrompt);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "BOOK_PICK_ALT") {
@@ -904,7 +919,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       const slot = session.slots?.[choice];
@@ -926,7 +941,7 @@ router.post("/voice", async (req, res) => {
         logInfo("CALL_ENDED_ALT_SLOT_INVALID", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logInfo("BOOKING_ALT_ATTEMPT", {
@@ -996,7 +1011,7 @@ router.post("/voice", async (req, res) => {
 
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logError("BOOKING_ALT_UNCONFIRMED", {
@@ -1012,7 +1027,7 @@ router.post("/voice", async (req, res) => {
       logInfo("CALL_ENDED_ALT_BOOKING_FAILED", { callSid });
       sayGoodbye(vr);
       clearSession(callSid);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     // =========================
@@ -1033,7 +1048,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       session.phone = phone;
@@ -1046,7 +1061,7 @@ router.post("/voice", async (req, res) => {
       session.step = "MODIFY_FIND_APPT";
       setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "MODIFY_FIND_APPT") {
@@ -1078,7 +1093,7 @@ router.post("/voice", async (req, res) => {
         setPrompt(session, "Quel est votre numéro de téléphone ?");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       session.foundEvent = found;
@@ -1104,7 +1119,7 @@ router.post("/voice", async (req, res) => {
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
       sayFr(g, session.lastPrompt);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "MODIFY_CONFIRM_FOUND") {
@@ -1123,7 +1138,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logInfo("APPOINTMENT_CONFIRMATION_RESPONSE", {
@@ -1141,7 +1156,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Très bien, redonnez-moi votre numéro pour vérification.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       const found = session.foundEvent;
@@ -1154,7 +1169,7 @@ router.post("/voice", async (req, res) => {
         logInfo("CALL_ENDED_MODIFY_MISSING_EVENT", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       if (isLessThan24h(found.startISO)) {
@@ -1171,7 +1186,7 @@ router.post("/voice", async (req, res) => {
         logInfo("CALL_ENDED_MODIFY_LT24H", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logInfo("MODIFY_CANCEL_OLD_APPOINTMENT_START", {
@@ -1195,7 +1210,7 @@ router.post("/voice", async (req, res) => {
       session.step = "MODIFY_PROPOSE_NEW";
       setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "MODIFY_PROPOSE_NEW") {
@@ -1229,7 +1244,7 @@ router.post("/voice", async (req, res) => {
         logWarn("MODIFY_NO_NEW_SLOTS_AFTER_CANCEL", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       sayFr(vr, "D’accord. Je vous propose deux nouveaux créneaux.");
@@ -1241,7 +1256,7 @@ router.post("/voice", async (req, res) => {
 
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, session.lastPrompt);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "MODIFY_PICK_NEW") {
@@ -1255,7 +1270,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       const slot = session.slots?.[choice];
@@ -1277,7 +1292,7 @@ router.post("/voice", async (req, res) => {
         logInfo("CALL_ENDED_MODIFY_INVALID_SLOT", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logInfo("MODIFY_BOOKING_ATTEMPT", {
@@ -1347,7 +1362,7 @@ router.post("/voice", async (req, res) => {
 
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logError("MODIFY_BOOKING_FAILED", {
@@ -1363,10 +1378,10 @@ router.post("/voice", async (req, res) => {
       logInfo("CALL_ENDED_MODIFY_BOOKING_FAILED", { callSid });
       sayGoodbye(vr);
       clearSession(callSid);
-      return res.type("text/xml").send(vr.toString());
-    }
+      return sendTwiml(res, vr);
+    } 
 
-    // =========================
+        // =========================
     // C) ANNULER RDV
     // =========================
     if (session.step === "CANCEL_ASK_PHONE") {
@@ -1384,7 +1399,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       session.phone = phone;
@@ -1397,7 +1412,7 @@ router.post("/voice", async (req, res) => {
       session.step = "CANCEL_FIND_APPT";
       setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "CANCEL_FIND_APPT") {
@@ -1429,7 +1444,7 @@ router.post("/voice", async (req, res) => {
         setPrompt(session, "Quel est votre numéro de téléphone ?");
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       session.foundEvent = found;
@@ -1455,7 +1470,7 @@ router.post("/voice", async (req, res) => {
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
       sayFr(g, session.lastPrompt);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "CANCEL_CONFIRM_FOUND") {
@@ -1474,7 +1489,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logInfo("APPOINTMENT_CONFIRMATION_RESPONSE", {
@@ -1492,7 +1507,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Très bien, redonnez-moi votre numéro pour vérification.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       const found = session.foundEvent;
@@ -1505,7 +1520,7 @@ router.post("/voice", async (req, res) => {
         logInfo("CALL_ENDED_CANCEL_MISSING_EVENT", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       if (isLessThan24h(found.startISO)) {
@@ -1522,7 +1537,7 @@ router.post("/voice", async (req, res) => {
         logInfo("CALL_ENDED_CANCEL_LT24H", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logInfo("CANCEL_APPOINTMENT_START", {
@@ -1572,7 +1587,7 @@ router.post("/voice", async (req, res) => {
       const g = gatherSpeech(vr, "/twilio/voice");
       sayFr(g, "Votre rendez-vous est annulé.");
       sayFr(g, session.lastPrompt);
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     if (session.step === "CANCEL_ASK_REBOOK") {
@@ -1591,7 +1606,7 @@ router.post("/voice", async (req, res) => {
         const g = gatherSpeech(vr, "/twilio/voice");
         sayFr(g, "Je n’ai pas compris.");
         sayFr(g, session.lastPrompt);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       logInfo("REBOOK_RESPONSE", {
@@ -1605,13 +1620,13 @@ router.post("/voice", async (req, res) => {
         logInfo("CALL_ENDED_AFTER_CANCEL_NO_REBOOK", { callSid });
         sayGoodbye(vr);
         clearSession(callSid);
-        return res.type("text/xml").send(vr.toString());
+        return sendTwiml(res, vr);
       }
 
       session.step = "BOOK_WELCOME";
       setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
-      return res.type("text/xml").send(vr.toString());
+      return sendTwiml(res, vr);
     }
 
     // =========================
@@ -1635,7 +1650,7 @@ router.post("/voice", async (req, res) => {
     const g = gatherSpeech(vr, "/twilio/voice");
     sayFr(g, "Je n’ai pas compris.");
     sayFr(g, session.lastPrompt);
-    return res.type("text/xml").send(vr.toString());
+    return sendTwiml(res, vr);
   } catch (err) {
     logError("UNEXPECTED_ERROR", {
       message: err?.message,
@@ -1653,7 +1668,7 @@ router.post("/voice", async (req, res) => {
     );
     sayGoodbye(vr);
     clearSession(callSid);
-    return res.type("text/xml").send(vr.toString());
+    return sendTwiml(res, vr);
   }
 });
 
