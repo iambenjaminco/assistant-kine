@@ -4,6 +4,7 @@ const { getAuth } = require("../config/googleAuth");
 
 const TIMEZONE = "Europe/Paris";
 const SLOT_MINUTES = 30;
+const FIRST_APPOINTMENT_MINUTES = 45; // fallback de sécurité
 
 const BUSINESS_HOURS = [
   {
@@ -26,8 +27,9 @@ function acquireSlotLock(key, ttlMs = 60_000) {
   const now = Date.now();
   const expiresAt = slotLocks.get(key);
 
-  // nettoyage simple si lock expiré
-  if (expiresAt && expiresAt <= now) slotLocks.delete(key);
+  if (expiresAt && expiresAt <= now) {
+    slotLocks.delete(key);
+  }
 
   if (slotLocks.has(key)) return false;
 
@@ -59,7 +61,16 @@ function isSlotBusy(slotStart, slotEnd, busyList) {
   return false;
 }
 
-function generateCandidateSlots(startDate, days = 7) {
+function resolveSlotMinutes({ durationMinutes, appointmentType }) {
+  const n = Number(durationMinutes);
+
+  if (Number.isFinite(n) && n > 0) return n;
+  if (appointmentType === "FIRST") return FIRST_APPOINTMENT_MINUTES;
+
+  return SLOT_MINUTES;
+}
+
+function generateCandidateSlots(startDate, days = 7, slotMinutes = SLOT_MINUTES) {
   const slots = [];
   const day0 = new Date(startDate);
 
@@ -80,9 +91,13 @@ function generateCandidateSlots(startDate, days = 7) {
       while (cursor < end) {
         const slotStart = new Date(cursor);
         const slotEnd = new Date(cursor);
-        slotEnd.setMinutes(slotEnd.getMinutes() + SLOT_MINUTES);
+        slotEnd.setMinutes(slotEnd.getMinutes() + slotMinutes);
 
-        if (slotEnd <= end) slots.push({ start: slotStart, end: slotEnd });
+        if (slotEnd <= end) {
+          slots.push({ start: slotStart, end: slotEnd });
+        }
+
+        // On continue par pas de 30 min pour garder une grille simple
         cursor.setMinutes(cursor.getMinutes() + SLOT_MINUTES);
       }
     }
@@ -91,7 +106,6 @@ function generateCandidateSlots(startDate, days = 7) {
   return slots;
 }
 
-// ✅ Une seule version : fiable + timezone
 function formatSlotFR(dateOrIso) {
   const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
   if (Number.isNaN(d.getTime())) return "une date invalide";
@@ -158,7 +172,6 @@ function extractPatientNameFromEvent(ev) {
   return patientName || null;
 }
 
-// ✅ Création d'évènement Google Calendar
 async function createAppointment({
   calendarId = "primary",
   patientName,
@@ -166,16 +179,33 @@ async function createAppointment({
   startDate,
   endDate,
   phone,
+  appointmentType,
+  durationMinutes,
 }) {
   const calendar = await getCalendarClient();
 
-  const startIso = new Date(startDate).toISOString();
-  const endIso = new Date(endDate).toISOString();
+  const start = new Date(startDate);
+  let end = new Date(endDate);
+
+  if (!(end > start)) {
+    const effectiveMinutes = resolveSlotMinutes({ durationMinutes, appointmentType });
+    end = new Date(start);
+    end.setMinutes(end.getMinutes() + effectiveMinutes);
+  }
+
+  const effectiveDurationMinutes = Math.round(
+    (end.getTime() - start.getTime()) / 60000
+  );
+
+  const startIso = start.toISOString();
+  const endIso = end.toISOString();
 
   const lines = [
     reason || "Rendez-vous kiné",
     `Patient : ${patientName || "Patient"}`,
     ...(phone ? [`Téléphone : ${phone}`] : []),
+    ...(appointmentType ? [`Type : ${appointmentType}`] : []),
+    `Durée : ${effectiveDurationMinutes} min`,
     "Origine : Assistant vocal",
   ];
 
@@ -196,7 +226,6 @@ async function createAppointment({
   return res.data;
 }
 
-// ✅ Vérifie si un créneau précis est disponible
 async function isSlotAvailable({ calendarId = "primary", startDate, endDate }) {
   const calendar = await getCalendarClient();
 
@@ -220,7 +249,6 @@ async function isSlotAvailable({ calendarId = "primary", startDate, endDate }) {
   return busy.length === 0;
 }
 
-// ✅ Réservation sécurisée (anti double booking MVP)
 async function bookAppointmentSafe({
   calendarId = "primary",
   patientName,
@@ -228,23 +256,41 @@ async function bookAppointmentSafe({
   startDate,
   endDate,
   phone,
+  appointmentType,
+  durationMinutes,
 }) {
-  const key = lockKey(calendarId, startDate, endDate);
+  const start = new Date(startDate);
+  let end = new Date(endDate);
+
+  if (!(end > start)) {
+    const effectiveMinutes = resolveSlotMinutes({ durationMinutes, appointmentType });
+    end = new Date(start);
+    end.setMinutes(end.getMinutes() + effectiveMinutes);
+  }
+
+  const key = lockKey(calendarId, start, end);
 
   const gotLock = acquireSlotLock(key, 60_000);
   if (!gotLock) return { ok: false, code: "LOCKED" };
 
   try {
-    const ok = await isSlotAvailable({ calendarId, startDate, endDate });
+    const ok = await isSlotAvailable({
+      calendarId,
+      startDate: start,
+      endDate: end,
+    });
+
     if (!ok) return { ok: false, code: "TAKEN" };
 
     const event = await createAppointment({
       calendarId,
       patientName,
       reason,
-      startDate,
-      endDate,
+      startDate: start,
+      endDate: end,
       phone,
+      appointmentType,
+      durationMinutes,
     });
 
     return { ok: true, event };
@@ -268,27 +314,31 @@ function assertPractitioners(practitioners) {
   }
 }
 
-async function suggestTwoSlotsNext7Days({ practitioners, days = 7 }) {
+async function suggestTwoSlotsNext7Days({
+  practitioners,
+  days = 7,
+  durationMinutes,
+  appointmentType,
+}) {
   assertPractitioners(practitioners);
 
   const calendar = await getCalendarClient();
+  const slotMinutes = resolveSlotMinutes({ durationMinutes, appointmentType });
 
   const now = new Date();
   const timeMin = new Date(now);
   const timeMax = new Date(now);
   timeMax.setDate(timeMax.getDate() + days);
 
-  const busyByCal = {};
-  for (const p of practitioners) {
-    busyByCal[p.calendarId] = await getBusyPeriods(
-      calendar,
-      p.calendarId,
-      timeMin,
-      timeMax
-    );
-  }
+  const busyEntries = await Promise.all(
+    practitioners.map(async (p) => {
+      const busy = await getBusyPeriods(calendar, p.calendarId, timeMin, timeMax);
+      return [p.calendarId, busy];
+    })
+  );
 
-  const candidates = generateCandidateSlots(now, days);
+  const busyByCal = Object.fromEntries(busyEntries);
+  const candidates = generateCandidateSlots(now, days, slotMinutes);
 
   const minLeadMinutes = 60;
   const cutoff = new Date(now);
@@ -329,26 +379,31 @@ async function suggestTwoSlotsNext7Days({ practitioners, days = 7 }) {
   };
 }
 
-async function suggestTwoSlotsFromDate({ practitioners, fromDate, days = 7 }) {
+async function suggestTwoSlotsFromDate({
+  practitioners,
+  fromDate,
+  days = 7,
+  durationMinutes,
+  appointmentType,
+}) {
   assertPractitioners(practitioners);
 
   const calendar = await getCalendarClient();
+  const slotMinutes = resolveSlotMinutes({ durationMinutes, appointmentType });
 
   const start = new Date(fromDate);
   const timeMax = new Date(start);
   timeMax.setDate(timeMax.getDate() + days);
 
-  const busyByCal = {};
-  for (const p of practitioners) {
-    busyByCal[p.calendarId] = await getBusyPeriods(
-      calendar,
-      p.calendarId,
-      start,
-      timeMax
-    );
-  }
+  const busyEntries = await Promise.all(
+    practitioners.map(async (p) => {
+      const busy = await getBusyPeriods(calendar, p.calendarId, start, timeMax);
+      return [p.calendarId, busy];
+    })
+  );
 
-  const candidates = generateCandidateSlots(start, days);
+  const busyByCal = Object.fromEntries(busyEntries);
+  const candidates = generateCandidateSlots(start, days, slotMinutes);
   const available = [];
 
   for (const c of candidates) {
@@ -370,7 +425,19 @@ async function suggestTwoSlotsFromDate({ practitioners, fromDate, days = 7 }) {
     if (available.length >= 2) break;
   }
 
-  return available.slice(0, 2);
+  const a = available[0];
+  const b = available[1] || available[0];
+
+  return {
+    slots: available.slice(0, 2),
+    speech: available.length
+      ? `Je peux vous proposer ${formatSlotFR(a.start)}${
+          a.practitionerName ? ` avec ${a.practitionerName}` : ""
+        } ou ${formatSlotFR(b.start)}${
+          b.practitionerName ? ` avec ${b.practitionerName}` : ""
+        }.`
+      : "Je n’ai pas trouvé de disponibilité à partir de cette date.",
+  };
 }
 
 // ======================================================
@@ -450,7 +517,6 @@ async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
   };
 }
 
-// ✅ Ajoute une note interne sur un RDV précis
 async function addCallbackNoteToEvent({ calendarId, eventId }) {
   const calendar = await getCalendarClient();
 
@@ -481,7 +547,6 @@ async function addCallbackNoteToEvent({ calendarId, eventId }) {
   return { ok: true, alreadyPresent: false };
 }
 
-// ✅ Annule / supprime un évènement
 async function cancelAppointmentSafe({ calendarId, eventId }) {
   const calendar = await getCalendarClient();
   await calendar.events.delete({
