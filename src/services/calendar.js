@@ -4,7 +4,7 @@ const { getAuth } = require("../config/googleAuth");
 
 const TIMEZONE = "Europe/Paris";
 const SLOT_MINUTES = 30;
-const FIRST_APPOINTMENT_MINUTES = 45; // fallback de sécurité
+const FIRST_APPOINTMENT_MINUTES = 45;
 
 const BUSINESS_HOURS = [
   {
@@ -16,7 +16,6 @@ const BUSINESS_HOURS = [
   },
 ];
 
-// ✅ Lock en mémoire pour éviter les doubles réservations (MVP)
 const slotLocks = new Map();
 
 function lockKey(calendarId, startDate, endDate) {
@@ -78,7 +77,7 @@ function generateCandidateSlots(startDate, days = 7, slotMinutes = SLOT_MINUTES)
     const day = new Date(day0);
     day.setDate(day0.getDate() + i);
 
-    const jsDow = day.getDay(); // 0=dim..6=sam
+    const jsDow = day.getDay();
     const isoDow = jsDow === 0 ? 7 : jsDow;
 
     const rule = BUSINESS_HOURS.find((r) => r.dow.includes(isoDow));
@@ -97,7 +96,6 @@ function generateCandidateSlots(startDate, days = 7, slotMinutes = SLOT_MINUTES)
           slots.push({ start: slotStart, end: slotEnd });
         }
 
-        // On continue par pas de 30 min pour garder une grille simple
         cursor.setMinutes(cursor.getMinutes() + SLOT_MINUTES);
       }
     }
@@ -172,6 +170,21 @@ function extractPatientNameFromEvent(ev) {
   return patientName || null;
 }
 
+function extractPhoneFromEvent(ev) {
+  const description = ev?.description || "";
+  const lines = description.split("\n").map((line) => line.trim());
+
+  const phoneLine = lines.find((line) => {
+    const normalized = normalizeText(line);
+    return normalized.startsWith("telephone :") || normalized.startsWith("téléphone :");
+  });
+
+  if (!phoneLine) return "";
+
+  const phone = phoneLine.split(":").slice(1).join(":").trim();
+  return normalizePhone(phone);
+}
+
 async function createAppointment({
   calendarId = "primary",
   patientName,
@@ -206,7 +219,8 @@ async function createAppointment({
     ...(phone ? [`Téléphone : ${phone}`] : []),
     ...(appointmentType ? [`Type : ${appointmentType}`] : []),
     `Durée : ${effectiveDurationMinutes} min`,
-    "Origine : Assistant vocal",
+    "Origine : Assistant vocal SaaS",
+    "Canal : Téléphone",
   ];
 
   const description = lines.join("\n");
@@ -298,10 +312,6 @@ async function bookAppointmentSafe({
     releaseSlotLock(key);
   }
 }
-
-// ======================================================
-// ✅ Suggestions multi-praticiens
-// ======================================================
 
 function assertPractitioners(practitioners) {
   if (!Array.isArray(practitioners) || practitioners.length === 0) {
@@ -404,10 +414,16 @@ async function suggestTwoSlotsFromDate({
 
   const busyByCal = Object.fromEntries(busyEntries);
   const candidates = generateCandidateSlots(start, days, slotMinutes);
+
+  const now = new Date();
+  const cutoff = new Date(now);
+  cutoff.setMinutes(cutoff.getMinutes() + 60);
+
   const available = [];
 
   for (const c of candidates) {
     if (c.start < start) continue;
+    if (c.start < cutoff) continue;
 
     for (const p of practitioners) {
       const busy = busyByCal[p.calendarId] || [];
@@ -440,12 +456,6 @@ async function suggestTwoSlotsFromDate({
   };
 }
 
-// ======================================================
-// ✅ Recherche + annulation Google Calendar
-// ======================================================
-
-// Cherche le prochain RDV correspondant au téléphone.
-// Retour: null ou { calendarId, eventId, startISO, summary, patientName }
 async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
   assertPractitioners(practitioners);
 
@@ -471,26 +481,19 @@ async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
     const items = res.data.items || [];
 
     for (const ev of items) {
-      const summary = ev.summary || "";
-      const desc = ev.description || "";
-
-      const summaryPhoneNorm = normalizePhone(summary);
-      const descPhoneNorm = normalizePhone(desc);
-
-      const phoneOk =
-        summaryPhoneNorm.includes(phoneNorm) ||
-        descPhoneNorm.includes(phoneNorm);
-
-      if (!phoneOk) continue;
+      if (ev.status === "cancelled") continue;
 
       const startISO = ev.start?.dateTime || ev.start?.date;
       if (!startISO) continue;
+
+      const eventPhone = extractPhoneFromEvent(ev);
+      if (eventPhone !== phoneNorm) continue;
 
       const candidate = {
         calendarId: p.calendarId,
         eventId: ev.id,
         startISO,
-        summary,
+        summary: ev.summary || "",
         patientName: extractPatientNameFromEvent(ev),
       };
 
@@ -549,11 +552,20 @@ async function addCallbackNoteToEvent({ calendarId, eventId }) {
 
 async function cancelAppointmentSafe({ calendarId, eventId }) {
   const calendar = await getCalendarClient();
-  await calendar.events.delete({
-    calendarId,
-    eventId,
-  });
-  return { ok: true };
+
+  try {
+    await calendar.events.delete({
+      calendarId,
+      eventId,
+    });
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      code: "DELETE_FAILED",
+      message: error?.message || "Impossible de supprimer le rendez-vous",
+    };
+  }
 }
 
 module.exports = {

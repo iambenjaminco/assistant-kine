@@ -72,15 +72,18 @@ function wantsMainMenu(text) {
   );
 }
 
-function gatherSpeech(vr, actionUrl) {
+function gatherSpeech(vr, actionUrl, overrides = {}) {
   return vr.gather({
-    input: "speech",
+    input: "speech dtmf",
     language: "fr-FR",
-    speechTimeout: "auto",
-    timeout: 10,
+    speechTimeout: 1,
+    timeout: 6,
     actionOnEmptyResult: true,
     action: actionUrl,
     method: "POST",
+    hints:
+      "prendre rendez-vous, modifier rendez-vous, annuler rendez-vous, premier, deuxième, second, autre jour, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous",
+    ...overrides,
   });
 }
 
@@ -137,6 +140,23 @@ function resetRetry(session) {
   session.retryCount = 0;
 }
 
+function promptAndGather(vr, session, prompt, intro = "") {
+  if (typeof prompt === "string") {
+    setPrompt(session, prompt);
+  }
+
+  if (intro) {
+    sayFr(vr, intro);
+  }
+
+  if (session.lastPrompt) {
+    sayFr(vr, session.lastPrompt);
+  }
+
+  gatherSpeech(vr, "/twilio/voice");
+  return vr;
+}
+
 function getCabinetOrFail(vr) {
   const cabinet = Object.values(CABINETS)[0];
 
@@ -180,7 +200,6 @@ function getSession(callSid) {
       noInputCount: 0,
       retryCount: 0,
       lastPrompt: "",
-      skipSilenceOnce: false,
 
       initialBookingSpeech: "",
       appointmentType: null, // FIRST | FOLLOW_UP
@@ -213,7 +232,6 @@ function resetToMenu(session) {
   session.noInputCount = 0;
   session.retryCount = 0;
   session.lastPrompt = "";
-  session.skipSilenceOnce = false;
 
   session.initialBookingSpeech = "";
   session.appointmentType = null;
@@ -230,8 +248,6 @@ function resetToMenu(session) {
 function getGuidedFallbackPrompt(step) {
   switch (step) {
     case "ACTION":
-    case "ACTION_LISTEN":
-    case "ACTION_WAIT":
       return "Merci de me dire prendre, modifier ou annuler un rendez-vous.";
     case "BOOK_ASK_APPOINTMENT_TYPE":
       return "Merci de me dire si c'est un premier rendez-vous ou un rendez-vous de suivi.";
@@ -763,14 +779,12 @@ async function proposeSlotsFromRequestedDate({
         ? "MODIFY_ASK_PREFERRED_DATE"
         : "BOOK_ASK_PREFERRED_DATE";
 
-    setPrompt(
+    promptAndGather(
+      vr,
       session,
-      "Je n’ai pas trouvé de créneau à cette date. Quel autre jour vous conviendrait ?"
+      "Je n’ai pas trouvé de disponibilité à cette date. Donnez-moi un autre jour qui vous conviendrait.",
+      emptyMessage || "Je n’ai pas trouvé de disponibilité à cette date."
     );
-
-    const g = gatherSpeech(vr, "/twilio/voice");
-    sayFr(g, emptyMessage || "Je n’ai pas trouvé de disponibilité à cette date.");
-    sayFr(g, session.lastPrompt);
     return sendTwiml(res, vr);
   }
 
@@ -801,10 +815,7 @@ async function proposeSlotsFromRequestedDate({
   }
 
   session.step = nextStep;
-  setPrompt(session, "Quel créneau vous convient ?");
-
-  const g = gatherSpeech(vr, "/twilio/voice");
-  sayFr(g, session.lastPrompt);
+  promptAndGather(vr, session, "Quel créneau vous convient ?");
   return sendTwiml(res, vr);
 }
 
@@ -861,12 +872,11 @@ async function proposeBookingSlots({
     sayFr(vr, msg);
 
     session.step = "BOOK_ASK_PREFERRED_DATE";
-    setPrompt(
+    promptAndGather(
+      vr,
       session,
-      "Quel autre jour vous conviendrait ? Vous pouvez dire par exemple jeudi ou lundi prochain."
+      "Quel autre jour vous conviendrait ? Vous pouvez dire par exemple jeudi, lundi prochain ou le 18 mars."
     );
-    const g = gatherSpeech(vr, "/twilio/voice");
-    sayFr(g, session.lastPrompt);
     return sendTwiml(res, vr);
   }
 
@@ -901,10 +911,7 @@ async function proposeBookingSlots({
   }
 
   session.step = "BOOK_PICK_SLOT";
-  setPrompt(session, "Quel créneau vous convient ?");
-
-  const g = gatherSpeech(vr, "/twilio/voice");
-  sayFr(g, session.lastPrompt);
+  promptAndGather(vr, session, "Quel créneau vous convient ?");
   return sendTwiml(res, vr);
 }
 
@@ -1039,10 +1046,7 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
   );
 
   session.step = "BOOK_PICK_ALT";
-  setPrompt(session, "Quel créneau vous convient ?");
-
-  const g = gatherSpeech(vr, "/twilio/voice");
-  sayFr(g, session.lastPrompt);
+  promptAndGather(vr, session, "Quel créneau vous convient ?");
   return sendTwiml(res, vr);
 }
 
@@ -1077,44 +1081,29 @@ router.post("/voice", async (req, res) => {
   const hasInput = Boolean(speech || digits);
   const normalizedSpeech = normalizeText(speech);
 
-  if (
-    hasInput &&
-    wantsMainMenu(normalizedSpeech) &&
-    session.step !== "ACTION" &&
-    session.step !== "ACTION_LISTEN" &&
-    session.step !== "ACTION_WAIT"
-  ) {
+  if (hasInput && wantsMainMenu(normalizedSpeech) && session.step !== "ACTION") {
     resetToMenu(session);
-    setPrompt(
+    promptAndGather(
+      vr,
       session,
-      PHRASES.askAction || "Voulez-vous prendre, modifier ou annuler un rendez-vous ?"
+      PHRASES.askAction || "Souhaitez-vous prendre, modifier ou annuler un rendez-vous ?",
+      "Très bien, retour au menu principal."
     );
-
-    const g = gatherSpeech(vr, "/twilio/voice");
-    sayFr(g, "Très bien, retour au menu principal.");
-    sayFr(g, session.lastPrompt);
     return sendTwiml(res, vr);
   }
 
   if (!hasInput && session.lastPrompt) {
-    if (session.skipSilenceOnce) {
-      session.skipSilenceOnce = false;
-    } else {
-      if (typeof session.noInputCount !== "number") session.noInputCount = 0;
-      session.noInputCount += 1;
+    session.noInputCount = (session.noInputCount || 0) + 1;
 
-      if (session.noInputCount === 1) {
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Vous êtes toujours là ?");
-        sayFr(g, session.lastPrompt);
-        return sendTwiml(res, vr);
-      }
-
-      sayFr(vr, "Je n’ai pas eu de réponse.");
-      sayGoodbye(vr);
-      clearSession(callSid);
+    if (session.noInputCount === 1) {
+      promptAndGather(vr, session, session.lastPrompt, "Vous êtes toujours là ?");
       return sendTwiml(res, vr);
     }
+
+    sayFr(vr, "Je n’ai pas eu de réponse.");
+    sayGoodbye(vr);
+    clearSession(callSid);
+    return sendTwiml(res, vr);
   }
 
   if (hasInput) {
@@ -1132,19 +1121,15 @@ router.post("/voice", async (req, res) => {
       if (!text) {
         setPrompt(
           session,
-          PHRASES.askAction || "Voulez-vous prendre, modifier ou annuler un rendez-vous ?"
+          PHRASES.askAction || "Souhaitez-vous prendre, modifier ou annuler un rendez-vous ?"
         );
 
         sayFr(
           vr,
           PHRASES.greeting || "Bonjour, vous êtes bien au cabinet de kinésithérapie."
         );
-
-        session.noInputCount = 0;
-        session.skipSilenceOnce = true;
-        session.step = "ACTION_LISTEN";
-
-        vr.redirect({ method: "POST" }, "/twilio/voice");
+        sayFr(vr, session.lastPrompt);
+        gatherSpeech(vr, "/twilio/voice");
         return sendTwiml(res, vr);
       }
 
@@ -1169,22 +1154,14 @@ router.post("/voice", async (req, res) => {
       if (wantsModify) {
         session.phonePurpose = "MODIFY";
         session.step = "MODIFY_ASK_PHONE";
-        setPrompt(session, "Quel est votre numéro de téléphone ?");
-
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Très bien.");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(vr, session, "Quel est votre numéro de téléphone ?", "Très bien.");
         return sendTwiml(res, vr);
       }
 
       if (wantsCancel) {
         session.phonePurpose = "CANCEL";
         session.step = "CANCEL_ASK_PHONE";
-        setPrompt(session, "Quel est votre numéro de téléphone ?");
-
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "D’accord.");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(vr, session, "Quel est votre numéro de téléphone ?", "D’accord.");
         return sendTwiml(res, vr);
       }
 
@@ -1192,7 +1169,6 @@ router.post("/voice", async (req, res) => {
         session.lastIntentContext = "BOOK";
         session.initialBookingSpeech = speech || "";
         session.step = "BOOK_WELCOME";
-        setPrompt(session, "");
         vr.redirect({ method: "POST" }, "/twilio/voice");
         return sendTwiml(res, vr);
       }
@@ -1200,32 +1176,12 @@ router.post("/voice", async (req, res) => {
       const retry = handleRetry(vr, res, session, callSid, "ACTION");
       if (retry) return retry;
 
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, "Je n’ai pas bien compris.");
-      sayFr(g, getGuidedFallbackPrompt("ACTION"));
-      return sendTwiml(res, vr);
-    }
-
-    if (session.step === "ACTION_LISTEN") {
-      setPrompt(
+      promptAndGather(
+        vr,
         session,
-        PHRASES.askAction || "Voulez-vous prendre, modifier ou annuler un rendez-vous ?"
+        getGuidedFallbackPrompt("ACTION"),
+        "Je n’ai pas bien compris."
       );
-
-      sayFr(vr, session.lastPrompt);
-
-      session.noInputCount = 0;
-      session.skipSilenceOnce = true;
-      session.step = "ACTION_WAIT";
-
-      vr.redirect({ method: "POST" }, "/twilio/voice");
-      return sendTwiml(res, vr);
-    }
-
-    if (session.step === "ACTION_WAIT") {
-      session.step = "ACTION";
-      session.noInputCount = 0;
-      gatherSpeech(vr, "/twilio/voice");
       return sendTwiml(res, vr);
     }
 
@@ -1264,32 +1220,28 @@ router.post("/voice", async (req, res) => {
 
       if (!session.appointmentType) {
         session.step = "BOOK_ASK_APPOINTMENT_TYPE";
-        setPrompt(
+        promptAndGather(
+          vr,
           session,
-          "S’agit-il d’un premier rendez-vous au cabinet, ou d’un rendez-vous de suivi ?"
+          "S’agit-il d’un premier rendez-vous au cabinet, ou d’un rendez-vous de suivi ?",
+          "Très bien."
         );
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Très bien.");
-        sayFr(g, session.lastPrompt);
         return sendTwiml(res, vr);
       }
 
       if (!session.practitionerPreferenceMode) {
         session.step = "BOOK_ASK_PRACTITIONER_PREF";
-        setPrompt(
+        promptAndGather(
+          vr,
           session,
           "Avez-vous une préférence pour un kiné en particulier ? Vous pouvez me donner son prénom, ou dire peu importe."
         );
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
         return sendTwiml(res, vr);
       }
 
       if (session.practitionerPreferenceMode === "USUAL" && !session.preferredPractitioner) {
         session.step = "BOOK_ASK_USUAL_PRACTITIONER";
-        setPrompt(session, "Avec quel kiné êtes-vous habituellement suivi ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(vr, session, "Avec quel kiné êtes-vous habituellement suivi ?");
         return sendTwiml(res, vr);
       }
 
@@ -1303,12 +1255,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_APPOINTMENT_TYPE");
         if (retry) return retry;
 
-        setPrompt(
+        promptAndGather(
+          vr,
           session,
           "Je n’ai pas bien compris. Merci de me dire si c’est un premier rendez-vous ou un rendez-vous de suivi."
         );
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
         return sendTwiml(res, vr);
       }
 
@@ -1317,13 +1268,12 @@ router.post("/voice", async (req, res) => {
         detectedType === "FIRST" ? durations.first : durations.followUp;
 
       session.step = "BOOK_ASK_PRACTITIONER_PREF";
-      setPrompt(
+      promptAndGather(
+        vr,
         session,
-        "Avez-vous une préférence pour un kiné en particulier ? Vous pouvez me donner son prénom, ou dire peu importe."
+        "Avez-vous une préférence pour un kiné en particulier ? Vous pouvez me donner son prénom, ou dire peu importe.",
+        "Très bien."
       );
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, "Très bien.");
-      sayFr(g, session.lastPrompt);
       return sendTwiml(res, vr);
     }
 
@@ -1348,22 +1298,18 @@ router.post("/voice", async (req, res) => {
         session.wantsUsualPractitioner = true;
         session.practitionerPreferenceMode = "USUAL";
         session.step = "BOOK_ASK_USUAL_PRACTITIONER";
-        setPrompt(session, "Avec quel kiné êtes-vous habituellement suivi ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Très bien.");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(vr, session, "Avec quel kiné êtes-vous habituellement suivi ?", "Très bien.");
         return sendTwiml(res, vr);
       }
 
       const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_PRACTITIONER_PREF");
       if (retry) return retry;
 
-      setPrompt(
+      promptAndGather(
+        vr,
         session,
         "Je n’ai pas bien compris. Merci de me dire le prénom du kiné souhaité, ou dites peu importe."
       );
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, session.lastPrompt);
       return sendTwiml(res, vr);
     }
 
@@ -1386,12 +1332,11 @@ router.post("/voice", async (req, res) => {
       const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_USUAL_PRACTITIONER");
       if (retry) return retry;
 
-      setPrompt(
+      promptAndGather(
+        vr,
         session,
         "Je n’ai pas bien compris. Merci de me dire avec quel kiné vous êtes suivi, ou dites peu importe."
       );
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, session.lastPrompt);
       return sendTwiml(res, vr);
     }
 
@@ -1431,9 +1376,7 @@ router.post("/voice", async (req, res) => {
           }.`
         );
 
-        setPrompt(session, "Quel créneau vous convient ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(vr, session, "Quel créneau vous convient ?");
         return sendTwiml(res, vr);
       }
 
@@ -1455,10 +1398,11 @@ router.post("/voice", async (req, res) => {
         }
 
         session.step = "BOOK_ASK_PREFERRED_DATE";
-        setPrompt(session, "Bien sûr. Quel jour vous conviendrait ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Très bien.");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "D’accord. Parmi les deux autres jours disponibles, lequel vous conviendrait ?"
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1486,7 +1430,6 @@ router.post("/voice", async (req, res) => {
 
         if (!a) {
           session.step = "BOOK_WELCOME";
-          setPrompt(session, "");
           sayFr(vr, "On recommence.");
           vr.redirect({ method: "POST" }, "/twilio/voice");
           return sendTwiml(res, vr);
@@ -1501,9 +1444,7 @@ router.post("/voice", async (req, res) => {
           `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou un autre jour.`
         );
 
-        setPrompt(session, "Quel créneau vous convient ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(vr, session, "Quel créneau vous convient ?");
         return sendTwiml(res, vr);
       }
 
@@ -1511,9 +1452,7 @@ router.post("/voice", async (req, res) => {
 
       if (!slot || !slot.calendarId) {
         sayFr(vr, "Ce créneau vient d’être pris. Je regarde d’autres disponibilités.");
-
         session.step = "BOOK_WELCOME";
-        setPrompt(session, "");
         vr.redirect({ method: "POST" }, "/twilio/voice");
         return sendTwiml(res, vr);
       }
@@ -1521,10 +1460,7 @@ router.post("/voice", async (req, res) => {
       session.pendingSlot = slot;
       session.step = "BOOK_ASK_NAME";
 
-      setPrompt(session, "Quel est votre nom et prénom ?");
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, "Très bien.");
-      sayFr(g, session.lastPrompt);
+      promptAndGather(vr, session, "Quel est votre nom et prénom ?", "Très bien.");
       return sendTwiml(res, vr);
     }
 
@@ -1535,12 +1471,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_PREFERRED_DATE");
         if (retry) return retry;
 
-        setPrompt(
+        promptAndGather(
+          vr,
           session,
           "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain ou le 18 mars."
         );
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
         return sendTwiml(res, vr);
       }
 
@@ -1564,9 +1499,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_NAME");
         if (retry) return retry;
 
-        setPrompt(session, "Je n’ai pas bien compris. Merci de me dire votre nom et prénom.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Je n’ai pas bien compris. Merci de me dire votre nom et prénom."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1574,10 +1511,7 @@ router.post("/voice", async (req, res) => {
       session.phonePurpose = "BOOK";
       session.step = "BOOK_ASK_PHONE";
 
-      setPrompt(session, "Quel est votre numéro de téléphone ?");
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, "Merci.");
-      sayFr(g, session.lastPrompt);
+      promptAndGather(vr, session, "Quel est votre numéro de téléphone ?", "Merci.");
       return sendTwiml(res, vr);
     }
 
@@ -1588,24 +1522,22 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_PHONE");
         if (retry) return retry;
 
-        setPrompt(
+        promptAndGather(
+          vr,
           session,
           "Je n’ai pas bien compris. Merci de me redonner votre numéro de téléphone chiffre par chiffre."
         );
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
         return sendTwiml(res, vr);
       }
 
       session.phoneCandidate = phone;
       session.step = "BOOK_CONFIRM_PHONE";
 
-      setPrompt(
+      promptAndGather(
+        vr,
         session,
         `Si j’ai bien compris, votre numéro est le ${formatPhoneForSpeech(phone)}. Est-ce correct ?`
       );
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, session.lastPrompt);
       return sendTwiml(res, vr);
     }
 
@@ -1616,9 +1548,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "BOOK_CONFIRM_PHONE");
         if (retry) return retry;
 
-        setPrompt(session, "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1626,9 +1560,11 @@ router.post("/voice", async (req, res) => {
         session.phoneCandidate = "";
         session.step = "BOOK_ASK_PHONE";
 
-        setPrompt(session, "Très bien. Redonnez-moi votre numéro de téléphone chiffre par chiffre.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Très bien. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1659,10 +1595,11 @@ router.post("/voice", async (req, res) => {
         }
 
         session.step = "BOOK_ASK_PREFERRED_DATE";
-        setPrompt(session, "Quel jour vous conviendrait ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Très bien.");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "D’accord. Parmi les deux autres jours disponibles, lequel vous conviendrait ?"
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1688,9 +1625,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "BOOK_PICK_ALT");
         if (retry) return retry;
 
-        setPrompt(session, "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1774,24 +1713,22 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "MODIFY_ASK_PHONE");
         if (retry) return retry;
 
-        setPrompt(
+        promptAndGather(
+          vr,
           session,
           "Je n’ai pas bien compris. Merci de me redonner votre numéro de téléphone chiffre par chiffre."
         );
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
         return sendTwiml(res, vr);
       }
 
       session.phoneCandidate = phone;
       session.step = "MODIFY_CONFIRM_PHONE";
 
-      setPrompt(
+      promptAndGather(
+        vr,
         session,
         `Si j’ai bien compris, votre numéro est le ${formatPhoneForSpeech(phone)}. Est-ce correct ?`
       );
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, session.lastPrompt);
       return sendTwiml(res, vr);
     }
 
@@ -1802,9 +1739,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "MODIFY_CONFIRM_PHONE");
         if (retry) return retry;
 
-        setPrompt(session, "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1812,9 +1751,11 @@ router.post("/voice", async (req, res) => {
         session.phoneCandidate = "";
         session.step = "MODIFY_ASK_PHONE";
 
-        setPrompt(session, "Très bien. Redonnez-moi votre numéro de téléphone chiffre par chiffre.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Très bien. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1822,7 +1763,6 @@ router.post("/voice", async (req, res) => {
       session.phoneCandidate = "";
       session.step = "MODIFY_FIND_APPT";
       session.lastIntentContext = "MODIFY";
-      setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
       return sendTwiml(res, vr);
     }
@@ -1841,9 +1781,7 @@ router.post("/voice", async (req, res) => {
         session.phone = "";
         session.foundEvent = null;
         session.step = "MODIFY_ASK_PHONE";
-        setPrompt(session, "Quel est votre numéro de téléphone ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(vr, session, "Quel est votre numéro de téléphone ?");
         return sendTwiml(res, vr);
       }
 
@@ -1860,10 +1798,8 @@ router.post("/voice", async (req, res) => {
 
       session.step = "MODIFY_CONFIRM_FOUND";
 
-      setPrompt(session, "Est-ce bien votre rendez-vous ?");
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
-      sayFr(g, session.lastPrompt);
+      sayFr(vr, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
+      promptAndGather(vr, session, "Est-ce bien votre rendez-vous ?");
       return sendTwiml(res, vr);
     }
 
@@ -1874,9 +1810,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "MODIFY_CONFIRM_FOUND");
         if (retry) return retry;
 
-        setPrompt(session, "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1884,10 +1822,12 @@ router.post("/voice", async (req, res) => {
         session.phone = "";
         session.foundEvent = null;
         session.step = "MODIFY_ASK_PHONE";
-        setPrompt(session, "Quel est votre numéro de téléphone ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Très bien, redonnez-moi votre numéro pour vérification.");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Quel est votre numéro de téléphone ?",
+          "Très bien, redonnez-moi votre numéro pour vérification."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -1915,13 +1855,22 @@ router.post("/voice", async (req, res) => {
         return sendTwiml(res, vr);
       }
 
-      await cancelAppointmentSafe({
+      const cancelResult = await cancelAppointmentSafe({
         calendarId: found.calendarId,
         eventId: found.eventId,
       });
 
+      if (!cancelResult.ok) {
+        sayFr(
+          vr,
+          "Je n’arrive pas à modifier le rendez-vous pour le moment. Merci de rappeler le cabinet."
+        );
+        sayGoodbye(vr);
+        clearSession(callSid);
+        return sendTwiml(res, vr);
+      }
+
       session.step = "MODIFY_PROPOSE_NEW";
-      setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
       return sendTwiml(res, vr);
     }
@@ -1976,10 +1925,7 @@ router.post("/voice", async (req, res) => {
       }
 
       session.step = "MODIFY_PICK_NEW";
-      setPrompt(session, "Quel créneau vous convient ?");
-
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, session.lastPrompt);
+      promptAndGather(vr, session, "Quel créneau vous convient ?");
       return sendTwiml(res, vr);
     }
 
@@ -2004,10 +1950,11 @@ router.post("/voice", async (req, res) => {
         }
 
         session.step = "MODIFY_ASK_PREFERRED_DATE";
-        setPrompt(session, "Bien sûr. Quel jour vous conviendrait ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Très bien.");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "D’accord. Parmi les deux autres jours disponibles, lequel vous conviendrait ?"
+        );
         return sendTwiml(res, vr);
       }
 
@@ -2033,9 +1980,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "MODIFY_PICK_NEW");
         if (retry) return retry;
 
-        setPrompt(session, "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -2116,12 +2065,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "MODIFY_ASK_PREFERRED_DATE");
         if (retry) return retry;
 
-        setPrompt(
+        promptAndGather(
+          vr,
           session,
           "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain ou le 18 mars."
         );
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
         return sendTwiml(res, vr);
       }
 
@@ -2148,24 +2096,22 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "CANCEL_ASK_PHONE");
         if (retry) return retry;
 
-        setPrompt(
+        promptAndGather(
+          vr,
           session,
           "Je n’ai pas bien compris. Merci de me redonner votre numéro de téléphone chiffre par chiffre."
         );
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
         return sendTwiml(res, vr);
       }
 
       session.phoneCandidate = phone;
       session.step = "CANCEL_CONFIRM_PHONE";
 
-      setPrompt(
+      promptAndGather(
+        vr,
         session,
         `Si j’ai bien compris, votre numéro est le ${formatPhoneForSpeech(phone)}. Est-ce correct ?`
       );
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, session.lastPrompt);
       return sendTwiml(res, vr);
     }
 
@@ -2176,9 +2122,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "CANCEL_CONFIRM_PHONE");
         if (retry) return retry;
 
-        setPrompt(session, "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -2186,16 +2134,17 @@ router.post("/voice", async (req, res) => {
         session.phoneCandidate = "";
         session.step = "CANCEL_ASK_PHONE";
 
-        setPrompt(session, "Très bien. Redonnez-moi votre numéro de téléphone chiffre par chiffre.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Très bien. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
+        );
         return sendTwiml(res, vr);
       }
 
       session.phone = session.phoneCandidate;
       session.phoneCandidate = "";
       session.step = "CANCEL_FIND_APPT";
-      setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
       return sendTwiml(res, vr);
     }
@@ -2214,9 +2163,7 @@ router.post("/voice", async (req, res) => {
         session.phone = "";
         session.foundEvent = null;
         session.step = "CANCEL_ASK_PHONE";
-        setPrompt(session, "Quel est votre numéro de téléphone ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(vr, session, "Quel est votre numéro de téléphone ?");
         return sendTwiml(res, vr);
       }
 
@@ -2224,10 +2171,8 @@ router.post("/voice", async (req, res) => {
       session.patientName = found.patientName || session.patientName || "Patient";
       session.step = "CANCEL_CONFIRM_FOUND";
 
-      setPrompt(session, "Est-ce bien votre rendez-vous ?");
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
-      sayFr(g, session.lastPrompt);
+      sayFr(vr, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
+      promptAndGather(vr, session, "Est-ce bien votre rendez-vous ?");
       return sendTwiml(res, vr);
     }
 
@@ -2238,9 +2183,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "CANCEL_CONFIRM_FOUND");
         if (retry) return retry;
 
-        setPrompt(session, "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -2248,10 +2195,12 @@ router.post("/voice", async (req, res) => {
         session.phone = "";
         session.foundEvent = null;
         session.step = "CANCEL_ASK_PHONE";
-        setPrompt(session, "Quel est votre numéro de téléphone ?");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, "Très bien, redonnez-moi votre numéro pour vérification.");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Quel est votre numéro de téléphone ?",
+          "Très bien, redonnez-moi votre numéro pour vérification."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -2279,10 +2228,20 @@ router.post("/voice", async (req, res) => {
         return sendTwiml(res, vr);
       }
 
-      await cancelAppointmentSafe({
+      const cancelResult = await cancelAppointmentSafe({
         calendarId: found.calendarId,
         eventId: found.eventId,
       });
+
+      if (!cancelResult.ok) {
+        sayFr(
+          vr,
+          "Je n’arrive pas à annuler le rendez-vous pour le moment. Merci de rappeler le cabinet."
+        );
+        sayGoodbye(vr);
+        clearSession(callSid);
+        return sendTwiml(res, vr);
+      }
 
       try {
         const sms = await sendAppointmentCancelledSMS({
@@ -2308,11 +2267,8 @@ router.post("/voice", async (req, res) => {
       }
 
       session.step = "CANCEL_ASK_REBOOK";
-      setPrompt(session, "Voulez-vous reprendre un rendez-vous ?");
-
-      const g = gatherSpeech(vr, "/twilio/voice");
-      sayFr(g, "Votre rendez-vous est annulé.");
-      sayFr(g, session.lastPrompt);
+      sayFr(vr, "Votre rendez-vous est annulé.");
+      promptAndGather(vr, session, "Voulez-vous reprendre un rendez-vous ?");
       return sendTwiml(res, vr);
     }
 
@@ -2323,9 +2279,11 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "CANCEL_ASK_REBOOK");
         if (retry) return retry;
 
-        setPrompt(session, "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non.");
-        const g = gatherSpeech(vr, "/twilio/voice");
-        sayFr(g, session.lastPrompt);
+        promptAndGather(
+          vr,
+          session,
+          "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non."
+        );
         return sendTwiml(res, vr);
       }
 
@@ -2338,7 +2296,6 @@ router.post("/voice", async (req, res) => {
 
       session.step = "BOOK_WELCOME";
       session.lastIntentContext = "BOOK";
-      setPrompt(session, "");
       vr.redirect({ method: "POST" }, "/twilio/voice");
       return sendTwiml(res, vr);
     }
@@ -2349,10 +2306,12 @@ router.post("/voice", async (req, res) => {
     const retry = handleRetry(vr, res, session, callSid, "FALLBACK");
     if (retry) return retry;
 
-    setPrompt(session, getGuidedFallbackPrompt(session.step));
-    const g = gatherSpeech(vr, "/twilio/voice");
-    sayFr(g, "Je n’ai pas bien compris.");
-    sayFr(g, session.lastPrompt);
+    promptAndGather(
+      vr,
+      session,
+      getGuidedFallbackPrompt(session.step),
+      "Je n’ai pas bien compris."
+    );
     return sendTwiml(res, vr);
   } catch (err) {
     logError("UNEXPECTED_ERROR", {
