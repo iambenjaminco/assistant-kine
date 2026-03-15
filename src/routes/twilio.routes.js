@@ -9,6 +9,7 @@ const {
     formatSlotFR,
     findNextAppointmentSafe,
     cancelAppointmentSafe,
+    addCallbackNoteToEvent,
 } = require("../services/calendar");
 
 const {
@@ -26,7 +27,6 @@ const router = express.Router();
 const sessions = new Map();
 
 // ✅ Voix FR configurable
-// Test avec Google Wavenet, souvent plus fiable que Polly sur <Say>
 const SAY_OPTS = {
     language: "fr-FR",
     voice: "Google.fr-FR-Wavenet-A",
@@ -66,6 +66,11 @@ function getSession(callSid) {
             retryCount: 0,
             lastPrompt: "",
             skipSilenceOnce: false,
+
+            // ✅ Nouveaux champs pour gérer les alternatives de dates
+            lastProposedStartISO: null,
+            requestedDateISO: null,
+            lastIntentContext: null, // "BOOK" | "MODIFY"
         });
     }
     return sessions.get(callSid);
@@ -86,6 +91,9 @@ function resetToMenu(session) {
     session.retryCount = 0;
     session.lastPrompt = "";
     session.skipSilenceOnce = false;
+    session.lastProposedStartISO = null;
+    session.requestedDateISO = null;
+    session.lastIntentContext = null;
 }
 
 function normalizeText(s) {
@@ -252,6 +260,297 @@ function handleRetry(vr, res, session, callSid, reason = "UNKNOWN") {
     }
 
     return null;
+}
+
+// =========================
+// Helpers date / alternatives
+// =========================
+
+function addDays(date, days) {
+    const d = new Date(date);
+    d.setDate(d.getDate() + days);
+    return d;
+}
+
+function startOfDay(date) {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    return d;
+}
+
+function toISODateOnly(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+}
+
+function buildDateAtStartOfDayISO(date) {
+    const d = startOfDay(date);
+    return d.toISOString();
+}
+
+function getFrenchMonthIndex(token) {
+    const months = {
+        janvier: 0,
+        fevrier: 1,
+        mars: 2,
+        avril: 3,
+        mai: 4,
+        juin: 5,
+        juillet: 6,
+        aout: 7,
+        septembre: 8,
+        octobre: 9,
+        novembre: 10,
+        decembre: 11,
+    };
+    return months[token] ?? null;
+}
+
+function getFrenchWeekdayIndex(token) {
+    const weekdays = {
+        dimanche: 0,
+        lundi: 1,
+        mardi: 2,
+        mercredi: 3,
+        jeudi: 4,
+        vendredi: 5,
+        samedi: 6,
+    };
+    return weekdays[token] ?? null;
+}
+
+function computeNextWeekdayDate(targetDow, nextWeek = false) {
+    const now = new Date();
+    const today = startOfDay(now);
+    const currentDow = today.getDay();
+
+    let delta = targetDow - currentDow;
+    if (delta < 0) delta += 7;
+
+    if (delta === 0) {
+        delta = nextWeek ? 7 : 0;
+    } else if (nextWeek) {
+        delta += 7;
+    }
+
+    return addDays(today, delta);
+}
+
+function detectAlternativeRequest(text) {
+    const t = normalizeText(text);
+
+    return (
+        t.includes("autre date") ||
+        t.includes("autre jour") ||
+        t.includes("un autre jour") ||
+        t.includes("une autre date") ||
+        t.includes("autre creneau") ||
+        t.includes("autre rendez") ||
+        t.includes("un autre rendez") ||
+        t.includes("pas disponible") ||
+        t.includes("je ne suis pas disponible") ||
+        t.includes("je suis pas disponible") ||
+        t.includes("je peux pas") ||
+        t.includes("je ne peux pas") ||
+        t.includes("pas possible") ||
+        t.includes("plus tard") ||
+        t.includes("plus tot") ||
+        t.includes("plus tard dans la semaine") ||
+        t.includes("avez vous autre chose") ||
+        t.includes("vous avez autre chose") ||
+        t.includes("autre chose")
+    );
+}
+
+function parseRequestedDate(text) {
+    const raw = normalizeText(text);
+
+    if (!raw) return null;
+
+    const now = new Date();
+    const today = startOfDay(now);
+
+    if (raw.includes("aujourd'hui") || raw.includes("aujourdhui")) {
+        return buildDateAtStartOfDayISO(today);
+    }
+
+    if (raw.includes("demain")) {
+        return buildDateAtStartOfDayISO(addDays(today, 1));
+    }
+
+    if (raw.includes("apres demain")) {
+        return buildDateAtStartOfDayISO(addDays(today, 2));
+    }
+
+    // dd/mm ou dd-mm
+    const numericMatch = raw.match(/\b(\d{1,2})[\/.-](\d{1,2})(?:[\/.-](\d{2,4}))?\b/);
+    if (numericMatch) {
+        const day = Number(numericMatch[1]);
+        const month = Number(numericMatch[2]) - 1;
+        let year = numericMatch[3] ? Number(numericMatch[3]) : today.getFullYear();
+        if (year < 100) year += 2000;
+
+        const d = new Date(year, month, day);
+        if (!Number.isNaN(d.getTime())) {
+            if (!numericMatch[3] && startOfDay(d) < today) {
+                d.setFullYear(d.getFullYear() + 1);
+            }
+            return buildDateAtStartOfDayISO(d);
+        }
+    }
+
+    // "18 mars", "18 avril", etc.
+    const longDateMatch = raw.match(
+        /\b(\d{1,2})\s+(janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)(?:\s+(\d{4}))?\b/
+    );
+    if (longDateMatch) {
+        const day = Number(longDateMatch[1]);
+        const month = getFrenchMonthIndex(longDateMatch[2]);
+        let year = longDateMatch[3] ? Number(longDateMatch[3]) : today.getFullYear();
+
+        if (month !== null) {
+            const d = new Date(year, month, day);
+            if (!Number.isNaN(d.getTime())) {
+                if (!longDateMatch[3] && startOfDay(d) < today) {
+                    d.setFullYear(d.getFullYear() + 1);
+                }
+                return buildDateAtStartOfDayISO(d);
+            }
+        }
+    }
+
+    // "lundi", "jeudi prochain"
+    const weekdayMatch = raw.match(
+        /\b(dimanche|lundi|mardi|mercredi|jeudi|vendredi|samedi)(?:\s+prochain)?\b/
+    );
+    if (weekdayMatch) {
+        const dow = getFrenchWeekdayIndex(weekdayMatch[1]);
+        const nextWeek = raw.includes("prochain");
+        if (dow !== null) {
+            return buildDateAtStartOfDayISO(computeNextWeekdayDate(dow, nextWeek));
+        }
+    }
+
+    return null;
+}
+
+function isExplicitDateRequest(text) {
+    return Boolean(parseRequestedDate(text));
+}
+
+async function lookupSlotsFromDate({ practitioners, fromDateISO }) {
+    const result = await suggestTwoSlotsFromDate({
+        practitioners,
+        fromDate: fromDateISO,
+    });
+
+    if (Array.isArray(result)) {
+        return { slots: result, speech: "" };
+    }
+
+    return {
+        slots: result?.slots || [],
+        speech: result?.speech || "",
+    };
+}
+
+function hydrateSlotsWithDefaultPractitioner(slots, cabinet) {
+    const defaultCalendarId = cabinet.practitioners[0].calendarId;
+
+    return (slots || []).map((s) => ({
+        ...s,
+        calendarId: s.calendarId || defaultCalendarId,
+        practitionerName: s.practitionerName || cabinet.practitioners[0].name,
+    }));
+}
+
+function rememberLastProposedSlots(session) {
+    session.lastProposedStartISO = session.slots?.[0]?.start || null;
+}
+
+async function proposeSlotsFromRequestedDate({
+    vr,
+    res,
+    session,
+    callSid,
+    cabinet,
+    requestedDateISO,
+    nextStep,
+    intro,
+    emptyMessage,
+}) {
+    const { slots, speech: proposeSpeech } = await lookupSlotsFromDate({
+        practitioners: cabinet.practitioners,
+        fromDateISO: requestedDateISO,
+    });
+
+    session.slots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+    session.requestedDateISO = requestedDateISO;
+    rememberLastProposedSlots(session);
+
+    logInfo("REQUESTED_DATE_SLOTS_RESULT", {
+        callSid,
+        requestedDateISO,
+        count: session.slots.length,
+        slots: summarizeSlots(session.slots),
+        context: session.lastIntentContext,
+    });
+
+    if (!session.slots.length) {
+        session.step =
+            session.lastIntentContext === "MODIFY"
+                ? "MODIFY_ASK_PREFERRED_DATE"
+                : "BOOK_ASK_PREFERRED_DATE";
+
+        setPrompt(
+            session,
+            "Je n’ai pas trouvé de créneau à cette date. Quel autre jour vous conviendrait ?"
+        );
+
+        const g = gatherSpeech(vr, "/twilio/voice");
+        sayFr(
+            g,
+            emptyMessage ||
+            "Je n’ai pas trouvé de disponibilité à cette date."
+        );
+        sayFr(g, session.lastPrompt);
+        return sendTwiml(res, vr);
+    }
+
+    if (intro) sayFr(vr, intro);
+
+    const cleaned = cleanProposeSpeech(proposeSpeech);
+    if (cleaned) {
+        sayFr(vr, cleaned);
+    } else {
+        const a = session.slots[0];
+        const b = session.slots[1] || session.slots[0];
+
+        sayFr(
+            vr,
+            `Je vous propose ${formatSlotFR(a.start)}${
+                a.practitionerName ? ` avec ${a.practitionerName}` : ""
+            }.`
+        );
+
+        if (b?.start && b.start !== a.start) {
+            sayFr(
+                vr,
+                `Ou ${formatSlotFR(b.start)}${
+                    b.practitionerName ? ` avec ${b.practitionerName}` : ""
+                }.`
+            );
+        }
+    }
+
+    session.step = nextStep;
+    setPrompt(session, "Vous préférez le premier ou le deuxième ?");
+
+    const g = gatherSpeech(vr, "/twilio/voice");
+    sayFr(g, session.lastPrompt);
+    return sendTwiml(res, vr);
 }
 
 // Webhook principal
@@ -447,6 +746,7 @@ router.post("/voice", async (req, res) => {
                 });
 
                 session.step = "BOOK_WELCOME";
+                session.lastIntentContext = "BOOK";
                 setPrompt(session, "");
                 vr.redirect({ method: "POST" }, "/twilio/voice");
                 return sendTwiml(res, vr);
@@ -509,6 +809,8 @@ router.post("/voice", async (req, res) => {
         // A) PRENDRE RDV
         // =========================
         if (session.step === "BOOK_WELCOME") {
+            session.lastIntentContext = "BOOK";
+
             logInfo("BOOKING_SLOTS_LOOKUP_START", {
                 callSid,
                 practitionersCount: cabinet.practitioners.length,
@@ -518,13 +820,8 @@ router.post("/voice", async (req, res) => {
                 practitioners: cabinet.practitioners,
             });
 
-            const defaultCalendarId = cabinet.practitioners[0].calendarId;
-
-            session.slots = (slots || []).map((s) => ({
-                ...s,
-                calendarId: s.calendarId || defaultCalendarId,
-                practitionerName: s.practitionerName || cabinet.practitioners[0].name,
-            }));
+            session.slots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+            rememberLastProposedSlots(session);
 
             logInfo("BOOKING_SLOTS_LOOKUP_RESULT", {
                 callSid,
@@ -558,7 +855,7 @@ router.post("/voice", async (req, res) => {
             session.step = "BOOK_PICK_SLOT";
             setPrompt(
                 session,
-                PHRASES.chooseSlot || "Vous préférez le premier ou le deuxième ?"
+                'Vous préférez le premier ou le deuxième ? Vous pouvez aussi dire "un autre jour".'
             );
 
             const g = gatherSpeech(vr, "/twilio/voice");
@@ -605,19 +902,81 @@ router.post("/voice", async (req, res) => {
                 sayFr(vr, "Je répète.");
                 sayFr(
                     vr,
-                    `Premier créneau : ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""
+                    `Premier créneau : ${formatSlotFR(a.start)}${
+                        a.practitionerName ? ` avec ${a.practitionerName}` : ""
                     }.`
                 );
                 sayFr(
                     vr,
-                    `Deuxième créneau : ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""
+                    `Deuxième créneau : ${formatSlotFR(b.start)}${
+                        b.practitionerName ? ` avec ${b.practitionerName}` : ""
                     }.`
                 );
 
-                setPrompt(session, "Vous préférez le premier ou le deuxième ?");
+                setPrompt(
+                    session,
+                    'Vous préférez le premier ou le deuxième ? Vous pouvez aussi dire "un autre jour".'
+                );
                 const g = gatherSpeech(vr, "/twilio/voice");
                 sayFr(g, session.lastPrompt);
                 return sendTwiml(res, vr);
+            }
+
+            // ✅ Demande d'une autre date / autre jour
+            if (detectAlternativeRequest(t)) {
+                logInfo("BOOKING_ALTERNATIVE_DATE_REQUESTED", {
+                    callSid,
+                    speech,
+                    previousFirstSlot: session.slots?.[0]?.start || null,
+                });
+
+                const requestedDateISO = parseRequestedDate(t);
+
+                if (requestedDateISO) {
+                    return proposeSlotsFromRequestedDate({
+                        vr,
+                        res,
+                        session,
+                        callSid,
+                        cabinet,
+                        requestedDateISO,
+                        nextStep: "BOOK_PICK_SLOT",
+                        intro: "Très bien, je regarde à cette date.",
+                        emptyMessage:
+                            "Je n’ai pas trouvé de disponibilité à cette date.",
+                    });
+                }
+
+                session.step = "BOOK_ASK_PREFERRED_DATE";
+                setPrompt(session, "Bien sûr. Quel jour vous conviendrait ?");
+                const g = gatherSpeech(vr, "/twilio/voice");
+                sayFr(g, "Très bien.");
+                sayFr(g, session.lastPrompt);
+                return sendTwiml(res, vr);
+            }
+
+            // ✅ Jour / date précise directement dans la réponse
+            if (isExplicitDateRequest(t)) {
+                const requestedDateISO = parseRequestedDate(t);
+
+                logInfo("BOOKING_SPECIFIC_DATE_REQUESTED", {
+                    callSid,
+                    speech,
+                    requestedDateISO,
+                });
+
+                return proposeSlotsFromRequestedDate({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet,
+                    requestedDateISO,
+                    nextStep: "BOOK_PICK_SLOT",
+                    intro: "Très bien, je regarde cette date.",
+                    emptyMessage:
+                        "Je n’ai pas trouvé de disponibilité à cette date.",
+                });
             }
 
             const choice = pickChoiceFromSpeech(speech, digits);
@@ -648,12 +1007,17 @@ router.post("/voice", async (req, res) => {
                 sayFr(vr, "Je n’ai pas compris.");
                 sayFr(
                     vr,
-                    `Dites "premier" pour ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""
-                    }, ou "deuxième" pour ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""
-                    }.`
+                    `Dites "premier" pour ${formatSlotFR(a.start)}${
+                        a.practitionerName ? ` avec ${a.practitionerName}` : ""
+                    }, "deuxième" pour ${formatSlotFR(b.start)}${
+                        b.practitionerName ? ` avec ${b.practitionerName}` : ""
+                    }, ou dites "un autre jour".`
                 );
 
-                setPrompt(session, "Premier ou deuxième ?");
+                setPrompt(
+                    session,
+                    'Premier, deuxième, ou "un autre jour" ?'
+                );
                 const g = gatherSpeech(vr, "/twilio/voice");
                 sayFr(g, session.lastPrompt);
                 return sendTwiml(res, vr);
@@ -693,6 +1057,43 @@ router.post("/voice", async (req, res) => {
             sayFr(g, "Très bien.");
             sayFr(g, session.lastPrompt);
             return sendTwiml(res, vr);
+        }
+
+        if (session.step === "BOOK_ASK_PREFERRED_DATE") {
+            const t = normalizeText(speech);
+            const requestedDateISO = parseRequestedDate(t);
+
+            if (!requestedDateISO) {
+                const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_PREFERRED_DATE");
+                if (retry) return retry;
+
+                setPrompt(
+                    session,
+                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain ou le 18 mars."
+                );
+                const g = gatherSpeech(vr, "/twilio/voice");
+                sayFr(g, session.lastPrompt);
+                return sendTwiml(res, vr);
+            }
+
+            logInfo("BOOKING_PREFERRED_DATE_CAPTURED", {
+                callSid,
+                speech,
+                requestedDateISO,
+            });
+
+            return proposeSlotsFromRequestedDate({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet,
+                requestedDateISO,
+                nextStep: "BOOK_PICK_SLOT",
+                intro: "Très bien, je regarde.",
+                emptyMessage:
+                    "Je n’ai pas trouvé de disponibilité à cette date.",
+            });
         }
 
         if (session.step === "BOOK_ASK_NAME") {
@@ -798,7 +1199,8 @@ router.post("/voice", async (req, res) => {
                 sayFr(vr, PHRASES.confirmed || "C’est confirmé.");
                 sayFr(
                     vr,
-                    `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
+                    `${formatSlotFR(slot.start)}${
+                        slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
                     }.`
                 );
 
@@ -843,17 +1245,13 @@ router.post("/voice", async (req, res) => {
                     ? "Ce créneau est en cours de réservation."
                     : "Ce créneau vient d’être pris.";
 
-            const alts = await suggestTwoSlotsFromDate({
+            const { slots: altSlots } = await lookupSlotsFromDate({
                 practitioners: cabinet.practitioners,
-                fromDate: slot.start,
+                fromDateISO: slot.start,
             });
 
-            const defaultCalendarId = cabinet.practitioners[0].calendarId;
-            session.slots = (alts || []).map((s) => ({
-                ...s,
-                calendarId: s.calendarId || defaultCalendarId,
-                practitionerName: s.practitionerName || cabinet.practitioners[0].name,
-            }));
+            session.slots = hydrateSlotsWithDefaultPractitioner(altSlots, cabinet);
+            rememberLastProposedSlots(session);
 
             logInfo("BOOKING_ALT_SLOTS_PROPOSED", {
                 callSid,
@@ -884,31 +1282,95 @@ router.post("/voice", async (req, res) => {
             sayFr(vr, statusMsg);
             sayFr(
                 vr,
-                `Premier : ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""
+                `Premier : ${formatSlotFR(a.start)}${
+                    a.practitionerName ? ` avec ${a.practitionerName}` : ""
                 }.`
             );
             sayFr(
                 vr,
-                `Deuxième : ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""
+                `Deuxième : ${formatSlotFR(b.start)}${
+                    b.practitionerName ? ` avec ${b.practitionerName}` : ""
                 }.`
             );
 
             session.step = "BOOK_PICK_ALT";
-            setPrompt(session, "Premier ou deuxième ?");
+            setPrompt(
+                session,
+                'Premier ou deuxième ? Vous pouvez aussi dire "un autre jour".'
+            );
 
             const g = gatherSpeech(vr, "/twilio/voice");
             sayFr(g, session.lastPrompt);
             return sendTwiml(res, vr);
         }
 
-        if (session.step === "BOOK_PICK_ALT") {
+                if (session.step === "BOOK_PICK_ALT") {
+            const t = normalizeText(speech);
+
+            if (detectAlternativeRequest(t)) {
+                logInfo("BOOKING_ALT_OTHER_DATE_REQUESTED", {
+                    callSid,
+                    speech,
+                });
+
+                const requestedDateISO = parseRequestedDate(t);
+
+                if (requestedDateISO) {
+                    return proposeSlotsFromRequestedDate({
+                        vr,
+                        res,
+                        session,
+                        callSid,
+                        cabinet,
+                        requestedDateISO,
+                        nextStep: "BOOK_PICK_ALT",
+                        intro: "Très bien, je regarde à cette date.",
+                        emptyMessage:
+                            "Je n’ai pas trouvé de disponibilité à cette date.",
+                    });
+                }
+
+                session.step = "BOOK_ASK_PREFERRED_DATE";
+                setPrompt(session, "Quel jour vous conviendrait ?");
+                const g = gatherSpeech(vr, "/twilio/voice");
+                sayFr(g, "Très bien.");
+                sayFr(g, session.lastPrompt);
+                return sendTwiml(res, vr);
+            }
+
+            if (isExplicitDateRequest(t)) {
+                const requestedDateISO = parseRequestedDate(t);
+
+                logInfo("BOOKING_ALT_SPECIFIC_DATE_REQUESTED", {
+                    callSid,
+                    speech,
+                    requestedDateISO,
+                });
+
+                return proposeSlotsFromRequestedDate({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet,
+                    requestedDateISO,
+                    nextStep: "BOOK_PICK_ALT",
+                    intro: "Très bien, je regarde cette date.",
+                    emptyMessage:
+                        "Je n’ai pas trouvé de disponibilité à cette date.",
+                });
+            }
+
             const choice = pickChoiceFromSpeech(speech, digits);
 
             if (choice === null) {
                 const retry = handleRetry(vr, res, session, callSid, "BOOK_PICK_ALT");
                 if (retry) return retry;
 
-                setPrompt(session, "Premier ou deuxième ?");
+                setPrompt(
+                    session,
+                    'Premier, deuxième, ou "un autre jour" ?'
+                );
                 const g = gatherSpeech(vr, "/twilio/voice");
                 sayFr(g, "Je n’ai pas compris.");
                 sayFr(g, session.lastPrompt);
@@ -966,7 +1428,8 @@ router.post("/voice", async (req, res) => {
                 sayFr(vr, PHRASES.confirmed || "C’est confirmé.");
                 sayFr(
                     vr,
-                    `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
+                    `${formatSlotFR(slot.start)}${
+                        slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
                     }.`
                 );
 
@@ -1051,6 +1514,7 @@ router.post("/voice", async (req, res) => {
             });
 
             session.step = "MODIFY_FIND_APPT";
+            session.lastIntentContext = "MODIFY";
             setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
             return sendTwiml(res, vr);
@@ -1212,6 +1676,8 @@ router.post("/voice", async (req, res) => {
         }
 
         if (session.step === "MODIFY_PROPOSE_NEW") {
+            session.lastIntentContext = "MODIFY";
+
             logInfo("MODIFY_NEW_SLOTS_LOOKUP_START", {
                 callSid,
                 practitionersCount: cabinet.practitioners.length,
@@ -1221,12 +1687,8 @@ router.post("/voice", async (req, res) => {
                 practitioners: cabinet.practitioners,
             });
 
-            const defaultCalendarId = cabinet.practitioners[0].calendarId;
-            session.slots = (slots || []).map((s) => ({
-                ...s,
-                calendarId: s.calendarId || defaultCalendarId,
-                practitionerName: s.practitionerName || cabinet.practitioners[0].name,
-            }));
+            session.slots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+            rememberLastProposedSlots(session);
 
             logInfo("MODIFY_NEW_SLOTS_LOOKUP_RESULT", {
                 callSid,
@@ -1250,7 +1712,10 @@ router.post("/voice", async (req, res) => {
             if (cleaned) sayFr(vr, cleaned);
 
             session.step = "MODIFY_PICK_NEW";
-            setPrompt(session, "Vous préférez le premier ou le deuxième ?");
+            setPrompt(
+                session,
+                'Vous préférez le premier ou le deuxième ? Vous pouvez aussi dire "un autre jour".'
+            );
 
             const g = gatherSpeech(vr, "/twilio/voice");
             sayFr(g, session.lastPrompt);
@@ -1258,13 +1723,72 @@ router.post("/voice", async (req, res) => {
         }
 
         if (session.step === "MODIFY_PICK_NEW") {
+            const t = normalizeText(speech);
+
+            if (detectAlternativeRequest(t)) {
+                logInfo("MODIFY_ALTERNATIVE_DATE_REQUESTED", {
+                    callSid,
+                    speech,
+                });
+
+                const requestedDateISO = parseRequestedDate(t);
+
+                if (requestedDateISO) {
+                    return proposeSlotsFromRequestedDate({
+                        vr,
+                        res,
+                        session,
+                        callSid,
+                        cabinet,
+                        requestedDateISO,
+                        nextStep: "MODIFY_PICK_NEW",
+                        intro: "Très bien, je regarde à cette date.",
+                        emptyMessage:
+                            "Je n’ai pas trouvé de disponibilité à cette date.",
+                    });
+                }
+
+                session.step = "MODIFY_ASK_PREFERRED_DATE";
+                setPrompt(session, "Bien sûr. Quel jour vous conviendrait ?");
+                const g = gatherSpeech(vr, "/twilio/voice");
+                sayFr(g, "Très bien.");
+                sayFr(g, session.lastPrompt);
+                return sendTwiml(res, vr);
+            }
+
+            if (isExplicitDateRequest(t)) {
+                const requestedDateISO = parseRequestedDate(t);
+
+                logInfo("MODIFY_SPECIFIC_DATE_REQUESTED", {
+                    callSid,
+                    speech,
+                    requestedDateISO,
+                });
+
+                return proposeSlotsFromRequestedDate({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet,
+                    requestedDateISO,
+                    nextStep: "MODIFY_PICK_NEW",
+                    intro: "Très bien, je regarde cette date.",
+                    emptyMessage:
+                        "Je n’ai pas trouvé de disponibilité à cette date.",
+                });
+            }
+
             const choice = pickChoiceFromSpeech(speech, digits);
 
             if (choice === null) {
                 const retry = handleRetry(vr, res, session, callSid, "MODIFY_PICK_NEW");
                 if (retry) return retry;
 
-                setPrompt(session, "Premier ou deuxième ?");
+                setPrompt(
+                    session,
+                    'Premier, deuxième, ou "un autre jour" ?'
+                );
                 const g = gatherSpeech(vr, "/twilio/voice");
                 sayFr(g, "Je n’ai pas compris.");
                 sayFr(g, session.lastPrompt);
@@ -1322,7 +1846,8 @@ router.post("/voice", async (req, res) => {
                 sayFr(vr, "C’est modifié et confirmé.");
                 sayFr(
                     vr,
-                    `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
+                    `${formatSlotFR(slot.start)}${
+                        slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
                     }.`
                 );
 
@@ -1376,6 +1901,43 @@ router.post("/voice", async (req, res) => {
             sayGoodbye(vr);
             clearSession(callSid);
             return sendTwiml(res, vr);
+        }
+
+        if (session.step === "MODIFY_ASK_PREFERRED_DATE") {
+            const t = normalizeText(speech);
+            const requestedDateISO = parseRequestedDate(t);
+
+            if (!requestedDateISO) {
+                const retry = handleRetry(vr, res, session, callSid, "MODIFY_ASK_PREFERRED_DATE");
+                if (retry) return retry;
+
+                setPrompt(
+                    session,
+                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain ou le 18 mars."
+                );
+                const g = gatherSpeech(vr, "/twilio/voice");
+                sayFr(g, session.lastPrompt);
+                return sendTwiml(res, vr);
+            }
+
+            logInfo("MODIFY_PREFERRED_DATE_CAPTURED", {
+                callSid,
+                speech,
+                requestedDateISO,
+            });
+
+            return proposeSlotsFromRequestedDate({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet,
+                requestedDateISO,
+                nextStep: "MODIFY_PICK_NEW",
+                intro: "Très bien, je regarde.",
+                emptyMessage:
+                    "Je n’ai pas trouvé de disponibilité à cette date.",
+            });
         }
 
         // =========================
@@ -1627,6 +2189,7 @@ router.post("/voice", async (req, res) => {
             }
 
             session.step = "BOOK_WELCOME";
+            session.lastIntentContext = "BOOK";
             setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
             return sendTwiml(res, vr);
