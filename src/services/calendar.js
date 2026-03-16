@@ -5,6 +5,9 @@ const { getAuth } = require("../config/googleAuth");
 const TIMEZONE = "Europe/Paris";
 const SLOT_MINUTES = 30;
 const FIRST_APPOINTMENT_MINUTES = 45;
+const DEFAULT_MIN_LEAD_MINUTES = 60;
+const DEFAULT_LOOKAHEAD_DAYS = 7;
+const DEFAULT_MAX_SUGGESTIONS = 2;
 
 const BUSINESS_HOURS = [
   {
@@ -16,7 +19,27 @@ const BUSINESS_HOURS = [
   },
 ];
 
+const TIME_PREFERENCE_RULES = {
+  MORNING: { label: "le matin", startHour: 8, endHour: 12 },
+  EARLY_AFTERNOON: { label: "en début d'après-midi", startHour: 12, endHour: 15 },
+  AFTERNOON: { label: "l'après-midi", startHour: 12, endHour: 18 },
+  LATE_AFTERNOON: { label: "en fin d'après-midi", startHour: 16, endHour: 19 },
+  EVENING: { label: "en soirée", startHour: 18, endHour: 21 },
+};
+
 const slotLocks = new Map();
+
+function logInfo(event, data = {}) {
+  console.log(`[CALENDAR][${event}]`, data);
+}
+
+function logWarn(event, data = {}) {
+  console.warn(`[CALENDAR][${event}]`, data);
+}
+
+function logError(event, data = {}) {
+  console.error(`[CALENDAR][${event}]`, data);
+}
 
 function lockKey(calendarId, startDate, endDate) {
   return `${calendarId}|${new Date(startDate).toISOString()}|${new Date(endDate).toISOString()}`;
@@ -69,7 +92,7 @@ function resolveSlotMinutes({ durationMinutes, appointmentType }) {
   return SLOT_MINUTES;
 }
 
-function generateCandidateSlots(startDate, days = 7, slotMinutes = SLOT_MINUTES) {
+function generateCandidateSlots(startDate, days = DEFAULT_LOOKAHEAD_DAYS, slotMinutes = SLOT_MINUTES) {
   const slots = [];
   const day0 = new Date(startDate);
 
@@ -183,6 +206,110 @@ function extractPhoneFromEvent(ev) {
 
   const phone = phoneLine.split(":").slice(1).join(":").trim();
   return normalizePhone(phone);
+}
+
+function getTimePreferenceRule(timePreference) {
+  return TIME_PREFERENCE_RULES[timePreference] || null;
+}
+
+function getHourInParis(dateOrIso) {
+  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  const formatter = new Intl.DateTimeFormat("fr-FR", {
+    hour: "2-digit",
+    hour12: false,
+    timeZone: TIMEZONE,
+  });
+
+  const parts = formatter.formatToParts(d);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value || NaN);
+  return Number.isFinite(hour) ? hour : null;
+}
+
+function matchesTimePreference(slotStart, timePreference) {
+  const rule = getTimePreferenceRule(timePreference);
+  if (!rule) return true;
+
+  const hour = getHourInParis(slotStart);
+  if (!Number.isFinite(hour)) return true;
+
+  return hour >= rule.startHour && hour < rule.endHour;
+}
+
+function practitionerSortKey(practitioner) {
+  return normalizeText(practitioner?.name || "");
+}
+
+function buildOrderedPractitioners(practitioners) {
+  return [...practitioners].sort((a, b) => {
+    const aKey = practitionerSortKey(a);
+    const bKey = practitionerSortKey(b);
+    return aKey.localeCompare(bKey, "fr");
+  });
+}
+
+function buildSlotSpeech(slots, { emptySpeech, timePreference } = {}) {
+  const available = slots || [];
+
+  if (!available.length) {
+    if (timePreference && getTimePreferenceRule(timePreference)) {
+      return `Je n’ai pas trouvé de disponibilité ${getTimePreferenceRule(timePreference).label}.`;
+    }
+    return emptySpeech || "Je n’ai pas trouvé de disponibilité.";
+  }
+
+  const a = available[0];
+  const b = available[1] || available[0];
+
+  if (b && b.start && a.start && b.start !== a.start) {
+    return `Je peux vous proposer ${formatSlotFR(a.start)}${
+      a.practitionerName ? ` avec ${a.practitionerName}` : ""
+    } ou ${formatSlotFR(b.start)}${
+      b.practitionerName ? ` avec ${b.practitionerName}` : ""
+    }.`;
+  }
+
+  return `Je peux vous proposer ${formatSlotFR(a.start)}${
+    a.practitionerName ? ` avec ${a.practitionerName}` : ""
+  }.`;
+}
+
+function selectAvailableSlots({
+  candidates,
+  practitioners,
+  busyByCal,
+  cutoff,
+  maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
+  timePreference = null,
+}) {
+  const orderedPractitioners = buildOrderedPractitioners(practitioners);
+  const available = [];
+  const seenKeys = new Set();
+
+  for (const c of candidates) {
+    if (c.start < cutoff) continue;
+    if (!matchesTimePreference(c.start, timePreference)) continue;
+
+    for (const p of orderedPractitioners) {
+      const busy = busyByCal[p.calendarId] || [];
+      if (isSlotBusy(c.start, c.end, busy)) continue;
+
+      const key = `${p.calendarId}|${c.start.toISOString()}|${c.end.toISOString()}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+
+      available.push({
+        start: c.start,
+        end: c.end,
+        calendarId: p.calendarId,
+        practitionerName: p.name,
+      });
+      break;
+    }
+
+    if (available.length >= maxSuggestions) break;
+  }
+
+  return available;
 }
 
 async function createAppointment({
@@ -326,9 +453,12 @@ function assertPractitioners(practitioners) {
 
 async function suggestTwoSlotsNext7Days({
   practitioners,
-  days = 7,
+  days = DEFAULT_LOOKAHEAD_DAYS,
   durationMinutes,
   appointmentType,
+  timePreference = null,
+  maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
+  minLeadMinutes = DEFAULT_MIN_LEAD_MINUTES,
 }) {
   assertPractitioners(practitioners);
 
@@ -350,51 +480,49 @@ async function suggestTwoSlotsNext7Days({
   const busyByCal = Object.fromEntries(busyEntries);
   const candidates = generateCandidateSlots(now, days, slotMinutes);
 
-  const minLeadMinutes = 60;
   const cutoff = new Date(now);
   cutoff.setMinutes(cutoff.getMinutes() + minLeadMinutes);
 
-  const available = [];
-  for (const c of candidates) {
-    if (c.start < cutoff) continue;
+  const available = selectAvailableSlots({
+    candidates,
+    practitioners,
+    busyByCal,
+    cutoff,
+    maxSuggestions,
+    timePreference,
+  });
 
-    for (const p of practitioners) {
-      const busy = busyByCal[p.calendarId] || [];
-      if (!isSlotBusy(c.start, c.end, busy)) {
-        available.push({
-          start: c.start,
-          end: c.end,
-          calendarId: p.calendarId,
-          practitionerName: p.name,
-        });
-        break;
-      }
-    }
-
-    if (available.length >= 2) break;
-  }
-
-  const a = available[0];
-  const b = available[1] || available[0];
+  logInfo("SUGGEST_NEXT_7_DAYS", {
+    practitioners: practitioners.map((p) => p.name),
+    days,
+    slotMinutes,
+    appointmentType: appointmentType || null,
+    timePreference,
+    results: available.map((slot) => ({
+      start: slot.start.toISOString(),
+      end: slot.end.toISOString(),
+      practitionerName: slot.practitionerName,
+    })),
+  });
 
   return {
-    slots: available.slice(0, 2),
-    speech: available.length
-      ? `Je peux vous proposer ${formatSlotFR(a.start)}${
-          a.practitionerName ? ` avec ${a.practitionerName}` : ""
-        } ou ${formatSlotFR(b.start)}${
-          b.practitionerName ? ` avec ${b.practitionerName}` : ""
-        }.`
-      : "Je n’ai pas de créneau disponible sur les 7 prochains jours.",
+    slots: available.slice(0, maxSuggestions),
+    speech: buildSlotSpeech(available.slice(0, maxSuggestions), {
+      emptySpeech: "Je n’ai pas de créneau disponible sur les 7 prochains jours.",
+      timePreference,
+    }),
   };
 }
 
 async function suggestTwoSlotsFromDate({
   practitioners,
   fromDate,
-  days = 7,
+  days = DEFAULT_LOOKAHEAD_DAYS,
   durationMinutes,
   appointmentType,
+  timePreference = null,
+  maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
+  minLeadMinutes = DEFAULT_MIN_LEAD_MINUTES,
 }) {
   assertPractitioners(practitioners);
 
@@ -417,42 +545,39 @@ async function suggestTwoSlotsFromDate({
 
   const now = new Date();
   const cutoff = new Date(now);
-  cutoff.setMinutes(cutoff.getMinutes() + 60);
+  cutoff.setMinutes(cutoff.getMinutes() + minLeadMinutes);
 
-  const available = [];
+  const effectiveCutoff = start > cutoff ? start : cutoff;
 
-  for (const c of candidates) {
-    if (c.start < start) continue;
-    if (c.start < cutoff) continue;
+  const available = selectAvailableSlots({
+    candidates,
+    practitioners,
+    busyByCal,
+    cutoff: effectiveCutoff,
+    maxSuggestions,
+    timePreference,
+  });
 
-    for (const p of practitioners) {
-      const busy = busyByCal[p.calendarId] || [];
-      if (!isSlotBusy(c.start, c.end, busy)) {
-        available.push({
-          start: c.start,
-          end: c.end,
-          calendarId: p.calendarId,
-          practitionerName: p.name,
-        });
-        break;
-      }
-    }
-
-    if (available.length >= 2) break;
-  }
-
-  const a = available[0];
-  const b = available[1] || available[0];
+  logInfo("SUGGEST_FROM_DATE", {
+    practitioners: practitioners.map((p) => p.name),
+    fromDate: start.toISOString(),
+    days,
+    slotMinutes,
+    appointmentType: appointmentType || null,
+    timePreference,
+    results: available.map((slot) => ({
+      start: slot.start.toISOString(),
+      end: slot.end.toISOString(),
+      practitionerName: slot.practitionerName,
+    })),
+  });
 
   return {
-    slots: available.slice(0, 2),
-    speech: available.length
-      ? `Je peux vous proposer ${formatSlotFR(a.start)}${
-          a.practitionerName ? ` avec ${a.practitionerName}` : ""
-        } ou ${formatSlotFR(b.start)}${
-          b.practitionerName ? ` avec ${b.practitionerName}` : ""
-        }.`
-      : "Je n’ai pas trouvé de disponibilité à partir de cette date.",
+    slots: available.slice(0, maxSuggestions),
+    speech: buildSlotSpeech(available.slice(0, maxSuggestions), {
+      emptySpeech: "Je n’ai pas trouvé de disponibilité à partir de cette date.",
+      timePreference,
+    }),
   };
 }
 
@@ -560,6 +685,12 @@ async function cancelAppointmentSafe({ calendarId, eventId }) {
     });
     return { ok: true };
   } catch (error) {
+    logError("DELETE_FAILED", {
+      calendarId,
+      eventId,
+      message: error?.message,
+    });
+
     return {
       ok: false,
       code: "DELETE_FAILED",
@@ -578,4 +709,5 @@ module.exports = {
   findNextAppointmentSafe,
   addCallbackNoteToEvent,
   cancelAppointmentSafe,
+  getTimePreferenceRule,
 };

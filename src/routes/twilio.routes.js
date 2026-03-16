@@ -32,6 +32,8 @@ const SAY_OPTS = {
   voice: "Google.fr-FR-Wavenet-A",
 };
 
+const PARIS_TIMEZONE = "Europe/Paris";
+
 function sayFr(node, text) {
   const safeText = String(text || "").trim();
 
@@ -82,7 +84,7 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
     action: actionUrl,
     method: "POST",
     hints:
-      "prendre rendez-vous, modifier rendez-vous, annuler rendez-vous, premier, deuxième, second, autre jour, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous",
+      "prendre rendez-vous, modifier rendez-vous, annuler rendez-vous, premier, deuxième, second, autre jour, autre horaire, matin, après-midi, fin d'après-midi, soir, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous",
     ...overrides,
   });
 }
@@ -138,6 +140,60 @@ function setPrompt(session, prompt) {
 
 function resetRetry(session) {
   session.retryCount = 0;
+}
+
+function nextVariantIndex(session, key) {
+  session.variantCursor = session.variantCursor || {};
+  const current = Number(session.variantCursor[key] || 0);
+  session.variantCursor[key] = current + 1;
+  return current;
+}
+
+function pickVariant(session, key, values) {
+  if (!Array.isArray(values) || !values.length) return "";
+  const index = nextVariantIndex(session, key) % values.length;
+  return values[index];
+}
+
+function sayAck(vr, session, kind = "neutral") {
+  const variants = {
+    neutral: ["D'accord.", "Très bien.", "Bien sûr.", "Parfait.", "Entendu."],
+    search: [
+      "Je regarde.",
+      "Je vérifie.",
+      "Je m'en occupe.",
+      "Je regarde cela.",
+      "Je consulte les disponibilités.",
+    ],
+    thanks: [
+      "Merci.",
+      "Parfait, merci.",
+      "C'est noté.",
+      "Très bien, merci.",
+      "Merci beaucoup.",
+    ],
+    back: [
+      "D'accord, retour au menu principal.",
+      "Très bien, je reviens au menu principal.",
+      "Entendu, on reprend depuis le début.",
+    ],
+    confirm: ["Très bien.", "C'est noté.", "Parfait.", "Entendu.", "Bien reçu."],
+    repeat: [
+      "Je répète.",
+      "Bien sûr, je répète.",
+      "Pas de souci, je répète.",
+      "Je vous redis les créneaux.",
+    ],
+    sorry: [
+      "Je n'ai pas bien compris.",
+      "Je n'ai pas saisi votre réponse.",
+      "Je préfère vérifier.",
+      "Je veux simplement être sûr d'avoir bien compris.",
+    ],
+  };
+
+  const text = pickVariant(session, `ack_${kind}`, variants[kind] || variants.neutral);
+  if (text) sayFr(vr, text);
 }
 
 function promptAndGather(vr, session, prompt, intro = "") {
@@ -200,6 +256,7 @@ function getSession(callSid) {
       noInputCount: 0,
       retryCount: 0,
       lastPrompt: "",
+      variantCursor: {},
 
       initialBookingSpeech: "",
       appointmentType: null, // FIRST | FOLLOW_UP
@@ -207,6 +264,7 @@ function getSession(callSid) {
       preferredPractitioner: null,
       practitionerPreferenceMode: null, // ANY | SPECIFIC | USUAL
       wantsUsualPractitioner: null,
+      preferredTimeWindow: null, // MORNING | EARLY_AFTERNOON | AFTERNOON | LATE_AFTERNOON | EVENING
 
       lastProposedStartISO: null,
       requestedDateISO: null,
@@ -239,6 +297,7 @@ function resetToMenu(session) {
   session.preferredPractitioner = null;
   session.practitionerPreferenceMode = null;
   session.wantsUsualPractitioner = null;
+  session.preferredTimeWindow = null;
 
   session.lastProposedStartISO = null;
   session.requestedDateISO = null;
@@ -252,16 +311,18 @@ function getGuidedFallbackPrompt(step) {
     case "BOOK_ASK_APPOINTMENT_TYPE":
       return "Merci de me dire si c'est un premier rendez-vous ou un rendez-vous de suivi.";
     case "BOOK_ASK_PRACTITIONER_PREF":
-      return "Merci de me dire le prénom du kiné souhaité, ou dites peu importe.";
+      return "Souhaitez-vous un kiné en particulier ? Répondez par oui, non, ou peu importe.";
+    case "BOOK_ASK_SPECIFIC_PRACTITIONER_NAME":
+      return "Merci de me donner le nom du kiné souhaité.";
     case "BOOK_ASK_USUAL_PRACTITIONER":
       return "Merci de me dire avec quel kiné vous êtes suivi, ou dites peu importe.";
     case "BOOK_PICK_SLOT":
     case "BOOK_PICK_ALT":
     case "MODIFY_PICK_NEW":
-      return "Vous pouvez me dire le premier, le deuxième, ou un autre jour.";
+      return "Vous pouvez me dire le premier, le deuxième, un autre jour, ou un autre horaire.";
     case "BOOK_ASK_PREFERRED_DATE":
     case "MODIFY_ASK_PREFERRED_DATE":
-      return "Vous pouvez dire par exemple demain, jeudi, lundi prochain ou le 18 mars.";
+      return "Vous pouvez dire par exemple demain, jeudi, lundi prochain, le 18 mars, ou mercredi en fin d'après-midi.";
     case "BOOK_ASK_NAME":
       return "Merci de me dire votre nom et prénom.";
     case "BOOK_ASK_PHONE":
@@ -277,6 +338,30 @@ function getGuidedFallbackPrompt(step) {
       return "Merci de répondre simplement par oui ou par non.";
     default:
       return "Je n’ai pas bien compris. Merci de reformuler simplement.";
+  }
+}
+
+function getNoInputIntro(step) {
+  switch (step) {
+    case "BOOK_CONFIRM_PHONE":
+    case "MODIFY_CONFIRM_PHONE":
+    case "CANCEL_CONFIRM_PHONE":
+    case "MODIFY_CONFIRM_FOUND":
+    case "CANCEL_CONFIRM_FOUND":
+    case "CANCEL_ASK_REBOOK":
+      return "Je n'ai pas entendu votre confirmation.";
+    case "BOOK_PICK_SLOT":
+    case "BOOK_PICK_ALT":
+    case "MODIFY_PICK_NEW":
+      return "Je n'ai pas entendu le créneau souhaité.";
+    case "BOOK_ASK_PHONE":
+    case "MODIFY_ASK_PHONE":
+    case "CANCEL_ASK_PHONE":
+      return "Je n'ai pas entendu votre numéro.";
+    case "BOOK_ASK_NAME":
+      return "Je n'ai pas entendu votre nom.";
+    default:
+      return "Je n'ai pas eu de réponse.";
   }
 }
 
@@ -383,6 +468,10 @@ function detectAlternativeRequest(text) {
     t.includes("un autre jour") ||
     t.includes("une autre date") ||
     t.includes("autre creneau") ||
+    t.includes("autre horaire") ||
+    t.includes("un autre horaire") ||
+    t.includes("plus tard") ||
+    t.includes("plus tot") ||
     t.includes("autre rendez") ||
     t.includes("un autre rendez") ||
     t.includes("pas disponible") ||
@@ -391,8 +480,6 @@ function detectAlternativeRequest(text) {
     t.includes("je peux pas") ||
     t.includes("je ne peux pas") ||
     t.includes("pas possible") ||
-    t.includes("plus tard") ||
-    t.includes("plus tot") ||
     t.includes("plus tard dans la semaine") ||
     t.includes("avez vous autre chose") ||
     t.includes("vous avez autre chose") ||
@@ -489,33 +576,175 @@ function isLessThan24h(startISO) {
   return start - now < 24 * 60 * 60 * 1000;
 }
 
+function detectTimePreference(text) {
+  const t = normalizeText(text);
+  if (!t) return null;
+
+  if (
+    t.includes("fin d'apres midi") ||
+    t.includes("fin dapres midi") ||
+    t.includes("fin d apres midi") ||
+    t.includes("en fin d'apres midi") ||
+    t.includes("en fin dapres midi") ||
+    t.includes("fin de journee")
+  ) {
+    return "LATE_AFTERNOON";
+  }
+
+  if (
+    t.includes("debut d'apres midi") ||
+    t.includes("debut dapres midi") ||
+    t.includes("en debut d'apres midi") ||
+    t.includes("tot l'apres midi") ||
+    t.includes("tot lapres midi")
+  ) {
+    return "EARLY_AFTERNOON";
+  }
+
+  if (t.includes("soir") || t.includes("en soiree") || t.includes("fin de soiree")) {
+    return "EVENING";
+  }
+
+  if (t.includes("matin") || t.includes("matinee")) {
+    return "MORNING";
+  }
+
+  if (t.includes("apres midi") || t.includes("apres-midi") || t.includes("apresmidi")) {
+    return "AFTERNOON";
+  }
+
+  return null;
+}
+
+function getHourInParis(startISO) {
+  const parts = new Intl.DateTimeFormat("fr-FR", {
+    hour: "2-digit",
+    hour12: false,
+    timeZone: PARIS_TIMEZONE,
+  }).formatToParts(new Date(startISO));
+
+  const hour = Number(parts.find((p) => p.type === "hour")?.value || NaN);
+  return Number.isFinite(hour) ? hour : null;
+}
+
+function slotMatchesTimePreference(slot, preference) {
+  if (!slot?.start || !preference) return true;
+
+  const hour = getHourInParis(slot.start);
+  if (!Number.isFinite(hour)) return true;
+
+  switch (preference) {
+    case "MORNING":
+      return hour < 12;
+    case "EARLY_AFTERNOON":
+      return hour >= 12 && hour < 15;
+    case "AFTERNOON":
+      return hour >= 12 && hour < 18;
+    case "LATE_AFTERNOON":
+      return hour >= 16 && hour < 19;
+    case "EVENING":
+      return hour >= 18;
+    default:
+      return true;
+  }
+}
+
+function filterSlotsByTimePreference(slots, preference) {
+  if (!preference) return slots || [];
+  return (slots || []).filter((slot) => slotMatchesTimePreference(slot, preference));
+}
+
+function describeTimePreference(preference) {
+  switch (preference) {
+    case "MORNING":
+      return "le matin";
+    case "EARLY_AFTERNOON":
+      return "en début d'après-midi";
+    case "AFTERNOON":
+      return "l'après-midi";
+    case "LATE_AFTERNOON":
+      return "en fin d'après-midi";
+    case "EVENING":
+      return "en soirée";
+    default:
+      return "sur ce créneau horaire";
+  }
+}
+
+function updateTimePreferenceFromSpeech(session, text, { clearOnExplicitNone = false } = {}) {
+  const t = normalizeText(text);
+  if (!t) return;
+
+  const explicitNone =
+    t.includes("n'importe quelle heure") ||
+    t.includes("nimporte quelle heure") ||
+    t.includes("peu importe l'heure") ||
+    t.includes("peu importe lheure") ||
+    t.includes("aucune preference horaire") ||
+    t.includes("pas de preference horaire");
+
+  if (explicitNone && clearOnExplicitNone) {
+    session.preferredTimeWindow = null;
+    return;
+  }
+
+  const detected = detectTimePreference(t);
+  if (detected) {
+    session.preferredTimeWindow = detected;
+  }
+}
+
 // =========================
 // Helpers métier
 // =========================
 
 function parseYesNo(text) {
   const t = normalizeText(text);
+  if (!t) return null;
 
-  const yes =
-    t.includes("oui") ||
-    t.includes("ouais") ||
-    t.includes("yes") ||
-    t.includes("cest ca") ||
-    t.includes("c est ca") ||
-    t.includes("exact") ||
-    t.includes("correct") ||
-    t.includes("daccord") ||
-    t.includes("d accord") ||
-    t === "ok" ||
-    t.includes("ca me va");
+  const noPatterns = [
+    /\bnon\b/,
+    /\bno\b/,
+    /pas du tout/,
+    /incorrect/,
+    /ce n'?est pas ca/,
+    /c'?est pas ca/,
+    /ce n'?est pas mon numero/,
+    /c'?est pas mon numero/,
+    /ce n'?est pas mon rendez/,
+    /c'?est pas mon rendez/,
+    /mauvais numero/,
+    /pas le bon/,
+  ];
 
-  const no =
-    t.includes("non") ||
-    t.includes("no") ||
-    t.includes("pas du tout") ||
-    t.includes("incorrect") ||
-    t.includes("ce n'est pas ca") ||
-    t.includes("cest pas ca");
+  const yesPatterns = [
+    /\boui\b/,
+    /\bouais\b/,
+    /\byes\b/,
+    /c'?est ca/,
+    /c est ca/,
+    /exact/,
+    /exactement/,
+    /correct/,
+    /tout a fait/,
+    /c'?est correct/,
+    /c'?est le bon/,
+    /c'?est bien le bon/,
+    /c'?est bien mon numero/,
+    /c'?est mon numero/,
+    /c'?est bien mon rendez/,
+    /c'?est bien mon rdv/,
+    /c'?est bien cela/,
+    /ca me va/,
+    /cela me va/,
+    /^ok$/,
+    /^daccord$/,
+    /^d accord$/,
+    /je confirme/,
+  ];
+
+  const no = noPatterns.some((pattern) => pattern.test(t));
+  const yes = yesPatterns.some((pattern) => pattern.test(t));
 
   if (yes && !no) return true;
   if (no && !yes) return false;
@@ -559,7 +788,10 @@ function detectNoPractitionerPreference(text) {
     t.includes("aucune preference") ||
     t.includes("comme vous voulez") ||
     t.includes("n'importe qui") ||
-    t.includes("pas important")
+    t.includes("pas important") ||
+    t === "non" ||
+    t.includes("non peu importe") ||
+    t.includes("non pas de preference")
   );
 }
 
@@ -620,7 +852,7 @@ function hydrateSlotsWithDefaultPractitioner(slots, cabinet) {
 function getSlotWeekdayFR(startISO) {
   return new Intl.DateTimeFormat("fr-FR", {
     weekday: "long",
-    timeZone: "Europe/Paris",
+    timeZone: PARIS_TIMEZONE,
   }).format(new Date(startISO));
 }
 
@@ -629,7 +861,7 @@ function getSlotHourMinuteFR(startISO) {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-    timeZone: "Europe/Paris",
+    timeZone: PARIS_TIMEZONE,
   }).format(new Date(startISO));
 }
 
@@ -674,8 +906,20 @@ function pickChoiceFromSpeech(text, digits, slots = []) {
     if (t.includes("matin") && aHour < 12 && !(bHour < 12)) return 0;
     if (t.includes("matin") && bHour < 12 && !(aHour < 12)) return 1;
 
-    if ((t.includes("apres midi") || t.includes("apres-midi")) && aHour >= 12 && !(bHour >= 12)) return 0;
-    if ((t.includes("apres midi") || t.includes("apres-midi")) && bHour >= 12 && !(aHour >= 12)) return 1;
+    if (
+      (t.includes("apres midi") || t.includes("apres-midi")) &&
+      aHour >= 12 &&
+      !(bHour >= 12)
+    ) {
+      return 0;
+    }
+    if (
+      (t.includes("apres midi") || t.includes("apres-midi")) &&
+      bHour >= 12 &&
+      !(aHour >= 12)
+    ) {
+      return 1;
+    }
   }
 
   return null;
@@ -722,11 +966,13 @@ async function lookupSlotsFromDate({
   practitioners,
   fromDateISO,
   appointmentDurationMinutes,
+  timePreference,
 }) {
   const result = await suggestTwoSlotsFromDate({
     practitioners,
     fromDate: fromDateISO,
     durationMinutes: appointmentDurationMinutes || undefined,
+    timePreference: timePreference || undefined,
   });
 
   if (Array.isArray(result)) {
@@ -737,6 +983,77 @@ async function lookupSlotsFromDate({
     slots: result?.slots || [],
     speech: result?.speech || "",
   };
+}
+
+function getSlotSelectionPrompt(session) {
+  const base = [
+    "Quel créneau vous convient ?",
+    "Lequel vous conviendrait ?",
+    "Quel créneau préférez-vous ?",
+  ];
+
+  if (session.preferredTimeWindow) {
+    return `${pickVariant(session, "slot_selection_prompt", base)} Vous pouvez aussi demander un autre jour ou un autre horaire.`;
+  }
+
+  return `${pickVariant(session, "slot_selection_prompt", base)} Vous pouvez aussi demander un autre jour.`;
+}
+
+function getPractitionerPrompt(session) {
+  return pickVariant(session, "practitioner_prompt", [
+    "Souhaitez-vous un kiné en particulier ?",
+    "Avez-vous une préférence pour un kiné en particulier ?",
+    "Voulez-vous un kiné en particulier ?",
+  ]);
+}
+
+function getPhoneConfirmPrompt(phone) {
+  return `Si j’ai bien compris, votre numéro est le ${formatPhoneForSpeech(phone)}. Est-ce correct ?`;
+}
+
+function getFilteredSlotsResponse(session, slots, fallbackPrompt) {
+  const filtered = filterSlotsByTimePreference(slots, session.preferredTimeWindow);
+
+  if (filtered.length) {
+    return {
+      slots: filtered,
+      hasTimeFilterMiss: false,
+      prompt: fallbackPrompt,
+    };
+  }
+
+  return {
+    slots: [],
+    hasTimeFilterMiss: Boolean(session.preferredTimeWindow),
+    prompt:
+      fallbackPrompt ||
+      (session.preferredTimeWindow
+        ? `Je n'ai pas trouvé de disponibilité ${describeTimePreference(session.preferredTimeWindow)}.`
+        : "Je n'ai pas trouvé de disponibilité à cette date."),
+  };
+}
+
+function saySlots(vr, session, slots) {
+  const a = slots?.[0];
+  const b = slots?.[1] || slots?.[0];
+
+  if (!a) return;
+
+  sayFr(
+    vr,
+    `Je peux vous proposer ${formatSlotFR(a.start)}${
+      a.practitionerName ? ` avec ${a.practitionerName}` : ""
+    }.`
+  );
+
+  if (b?.start && b.start !== a.start) {
+    sayFr(
+      vr,
+      `Ou ${formatSlotFR(b.start)}${
+        b.practitionerName ? ` avec ${b.practitionerName}` : ""
+      }.`
+    );
+  }
 }
 
 async function proposeSlotsFromRequestedDate({
@@ -756,9 +1073,13 @@ async function proposeSlotsFromRequestedDate({
     practitioners: searchPractitioners,
     fromDateISO: requestedDateISO,
     appointmentDurationMinutes: session.appointmentDurationMinutes,
+    timePreference: session.preferredTimeWindow,
   });
 
-  session.slots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+  const hydratedSlots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+  const filtered = getFilteredSlotsResponse(session, hydratedSlots, emptyMessage);
+
+  session.slots = filtered.slots;
   session.requestedDateISO = requestedDateISO;
   rememberLastProposedSlots(session);
 
@@ -768,6 +1089,7 @@ async function proposeSlotsFromRequestedDate({
     appointmentType: session.appointmentType,
     appointmentDurationMinutes: session.appointmentDurationMinutes,
     preferredPractitioner: session.preferredPractitioner?.name || null,
+    preferredTimeWindow: session.preferredTimeWindow || null,
     count: session.slots.length,
     slots: summarizeSlots(session.slots),
     context: session.lastIntentContext,
@@ -779,11 +1101,17 @@ async function proposeSlotsFromRequestedDate({
         ? "MODIFY_ASK_PREFERRED_DATE"
         : "BOOK_ASK_PREFERRED_DATE";
 
+    const noAvailabilityPrompt = filtered.hasTimeFilterMiss
+      ? `Je n'ai pas trouvé de disponibilité ${describeTimePreference(session.preferredTimeWindow)} à cette date. Donnez-moi un autre jour ou un autre horaire qui vous conviendrait.`
+      : "Je n’ai pas trouvé de disponibilité à cette date. Donnez-moi un autre jour qui vous conviendrait.";
+
     promptAndGather(
       vr,
       session,
-      "Je n’ai pas trouvé de disponibilité à cette date. Donnez-moi un autre jour qui vous conviendrait.",
-      emptyMessage || "Je n’ai pas trouvé de disponibilité à cette date."
+      noAvailabilityPrompt,
+      filtered.hasTimeFilterMiss
+        ? `Je n'ai rien trouvé ${describeTimePreference(session.preferredTimeWindow)}.`
+        : "Je n’ai pas trouvé de disponibilité à cette date."
     );
     return sendTwiml(res, vr);
   }
@@ -791,31 +1119,14 @@ async function proposeSlotsFromRequestedDate({
   if (intro) sayFr(vr, intro);
 
   const cleaned = cleanProposeSpeech(proposeSpeech);
-  if (cleaned) {
+  if (cleaned && !session.preferredTimeWindow) {
     sayFr(vr, cleaned);
   } else {
-    const a = session.slots[0];
-    const b = session.slots[1] || session.slots[0];
-
-    sayFr(
-      vr,
-      `Je peux vous proposer ${formatSlotFR(a.start)}${
-        a.practitionerName ? ` avec ${a.practitionerName}` : ""
-      }.`
-    );
-
-    if (b?.start && b.start !== a.start) {
-      sayFr(
-        vr,
-        `Ou ${formatSlotFR(b.start)}${
-          b.practitionerName ? ` avec ${b.practitionerName}` : ""
-        }.`
-      );
-    }
+    saySlots(vr, session, session.slots);
   }
 
   session.step = nextStep;
-  promptAndGather(vr, session, "Quel créneau vous convient ?");
+  promptAndGather(vr, session, getSlotSelectionPrompt(session));
   return sendTwiml(res, vr);
 }
 
@@ -835,6 +1146,7 @@ async function proposeBookingSlots({
     preferredPractitioner: session.preferredPractitioner?.name || null,
     appointmentType: session.appointmentType,
     appointmentDurationMinutes: session.appointmentDurationMinutes,
+    preferredTimeWindow: session.preferredTimeWindow || null,
     fromDateISO,
   });
 
@@ -843,16 +1155,25 @@ async function proposeBookingSlots({
         practitioners: searchPractitioners,
         fromDate: fromDateISO,
         durationMinutes: session.appointmentDurationMinutes || undefined,
+        timePreference: session.preferredTimeWindow || undefined,
       })
     : await suggestTwoSlotsNext7Days({
         practitioners: searchPractitioners,
         durationMinutes: session.appointmentDurationMinutes || undefined,
+        timePreference: session.preferredTimeWindow || undefined,
       });
 
   const slots = Array.isArray(result) ? result : result?.slots || [];
   const proposeSpeech = Array.isArray(result) ? "" : result?.speech || "";
 
-  session.slots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+  const hydratedSlots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+  const filtered = getFilteredSlotsResponse(
+    session,
+    hydratedSlots,
+    PHRASES.noAvailability || "Je n’ai pas de créneau disponible dans les prochains jours."
+  );
+
+  session.slots = filtered.slots;
   rememberLastProposedSlots(session);
 
   logInfo("BOOKING_SLOTS_LOOKUP_RESULT", {
@@ -861,13 +1182,15 @@ async function proposeBookingSlots({
     slots: summarizeSlots(session.slots),
     preferredPractitioner: session.preferredPractitioner?.name || null,
     appointmentType: session.appointmentType,
+    preferredTimeWindow: session.preferredTimeWindow || null,
   });
 
   if (!session.slots.length) {
-    const msg =
-      cleanProposeSpeech(proposeSpeech) ||
-      PHRASES.noAvailability ||
-      "Je n’ai pas de créneau disponible dans les prochains jours.";
+    const msg = filtered.hasTimeFilterMiss
+      ? `Je n'ai pas trouvé de créneau ${describeTimePreference(session.preferredTimeWindow)} dans les prochains jours.`
+      : cleanProposeSpeech(proposeSpeech) ||
+        PHRASES.noAvailability ||
+        "Je n’ai pas de créneau disponible dans les prochains jours.";
 
     sayFr(vr, msg);
 
@@ -875,43 +1198,28 @@ async function proposeBookingSlots({
     promptAndGather(
       vr,
       session,
-      "Quel autre jour vous conviendrait ? Vous pouvez dire par exemple jeudi, lundi prochain ou le 18 mars."
+      filtered.hasTimeFilterMiss
+        ? "Donnez-moi un autre jour ou un autre horaire. Vous pouvez dire par exemple jeudi matin, mercredi en fin d'après-midi ou le 18 mars."
+        : "Quel autre jour vous conviendrait ? Vous pouvez dire par exemple jeudi, lundi prochain ou le 18 mars."
     );
     return sendTwiml(res, vr);
   }
 
   if (session.preferredPractitioner?.name) {
-    sayFr(vr, `Très bien, je cherche avec ${session.preferredPractitioner.name}.`);
+    sayFr(vr, `Je cherche avec ${session.preferredPractitioner.name}.`);
   } else {
-    sayFr(vr, "Très bien.");
+    sayAck(vr, session, "search");
   }
 
   const cleaned = cleanProposeSpeech(proposeSpeech);
-  if (cleaned) {
+  if (cleaned && !session.preferredTimeWindow) {
     sayFr(vr, cleaned);
   } else {
-    const a = session.slots[0];
-    const b = session.slots[1] || session.slots[0];
-
-    sayFr(
-      vr,
-      `Je peux vous proposer ${formatSlotFR(a.start)}${
-        a.practitionerName ? ` avec ${a.practitionerName}` : ""
-      }.`
-    );
-
-    if (b?.start && b.start !== a.start) {
-      sayFr(
-        vr,
-        `Ou ${formatSlotFR(b.start)}${
-          b.practitionerName ? ` avec ${b.practitionerName}` : ""
-        }.`
-      );
-    }
+    saySlots(vr, session, session.slots);
   }
 
   session.step = "BOOK_PICK_SLOT";
-  promptAndGather(vr, session, "Quel créneau vous convient ?");
+  promptAndGather(vr, session, getSlotSelectionPrompt(session));
   return sendTwiml(res, vr);
 }
 
@@ -1013,9 +1321,11 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
     practitioners: searchPractitioners,
     fromDateISO: slot.start,
     appointmentDurationMinutes: session.appointmentDurationMinutes,
+    timePreference: session.preferredTimeWindow,
   });
 
-  session.slots = hydrateSlotsWithDefaultPractitioner(altSlots, cabinet);
+  const hydratedAltSlots = hydrateSlotsWithDefaultPractitioner(altSlots, cabinet);
+  session.slots = filterSlotsByTimePreference(hydratedAltSlots, session.preferredTimeWindow);
   rememberLastProposedSlots(session);
 
   if (!session.slots?.length) {
@@ -1028,25 +1338,11 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
     return sendTwiml(res, vr);
   }
 
-  const a = session.slots[0];
-  const b = session.slots[1] || session.slots[0];
-
   sayFr(vr, statusMsg);
-  sayFr(
-    vr,
-    `Je peux vous proposer ${formatSlotFR(a.start)}${
-      a.practitionerName ? ` avec ${a.practitionerName}` : ""
-    }.`
-  );
-  sayFr(
-    vr,
-    `Ou ${formatSlotFR(b.start)}${
-      b.practitionerName ? ` avec ${b.practitionerName}` : ""
-    }.`
-  );
+  saySlots(vr, session, session.slots);
 
   session.step = "BOOK_PICK_ALT";
-  promptAndGather(vr, session, "Quel créneau vous convient ?");
+  promptAndGather(vr, session, getSlotSelectionPrompt(session));
   return sendTwiml(res, vr);
 }
 
@@ -1087,7 +1383,11 @@ router.post("/voice", async (req, res) => {
       vr,
       session,
       PHRASES.askAction || "Souhaitez-vous prendre, modifier ou annuler un rendez-vous ?",
-      "Très bien, retour au menu principal."
+      pickVariant(session, "menu_back", [
+        "D'accord, retour au menu principal.",
+        "Très bien, je reviens au menu principal.",
+        "Entendu, on repart du début.",
+      ])
     );
     return sendTwiml(res, vr);
   }
@@ -1096,7 +1396,7 @@ router.post("/voice", async (req, res) => {
     session.noInputCount = (session.noInputCount || 0) + 1;
 
     if (session.noInputCount === 1) {
-      promptAndGather(vr, session, session.lastPrompt, "Vous êtes toujours là ?");
+      promptAndGather(vr, session, session.lastPrompt, getNoInputIntro(session.step));
       return sendTwiml(res, vr);
     }
 
@@ -1109,6 +1409,7 @@ router.post("/voice", async (req, res) => {
   if (hasInput) {
     session.noInputCount = 0;
     resetRetry(session);
+    updateTimePreferenceFromSpeech(session, speech, { clearOnExplicitNone: true });
   }
 
   try {
@@ -1154,14 +1455,14 @@ router.post("/voice", async (req, res) => {
       if (wantsModify) {
         session.phonePurpose = "MODIFY";
         session.step = "MODIFY_ASK_PHONE";
-        promptAndGather(vr, session, "Quel est votre numéro de téléphone ?", "Très bien.");
+        promptAndGather(vr, session, "Quel est votre numéro de téléphone ?", "Bien sûr.");
         return sendTwiml(res, vr);
       }
 
       if (wantsCancel) {
         session.phonePurpose = "CANCEL";
         session.step = "CANCEL_ASK_PHONE";
-        promptAndGather(vr, session, "Quel est votre numéro de téléphone ?", "D’accord.");
+        promptAndGather(vr, session, "Quel est votre numéro de téléphone ?", "D'accord.");
         return sendTwiml(res, vr);
       }
 
@@ -1180,7 +1481,11 @@ router.post("/voice", async (req, res) => {
         vr,
         session,
         getGuidedFallbackPrompt("ACTION"),
-        "Je n’ai pas bien compris."
+        pickVariant(session, "fallback_action_intro", [
+          "Je n’ai pas bien compris.",
+          "Je n'ai pas saisi votre demande.",
+          "Je préfère vérifier votre demande.",
+        ])
       );
       return sendTwiml(res, vr);
     }
@@ -1191,6 +1496,7 @@ router.post("/voice", async (req, res) => {
     if (session.step === "BOOK_WELCOME") {
       session.lastIntentContext = "BOOK";
       const seed = session.initialBookingSpeech || "";
+      updateTimePreferenceFromSpeech(session, seed, { clearOnExplicitNone: false });
 
       if (!session.appointmentType) {
         const detectedType = detectAppointmentType(seed);
@@ -1224,18 +1530,14 @@ router.post("/voice", async (req, res) => {
           vr,
           session,
           "S’agit-il d’un premier rendez-vous au cabinet, ou d’un rendez-vous de suivi ?",
-          "Très bien."
+          pickVariant(session, "book_intro_type", ["D'accord.", "Très bien.", "Bien sûr."])
         );
         return sendTwiml(res, vr);
       }
 
       if (!session.practitionerPreferenceMode) {
         session.step = "BOOK_ASK_PRACTITIONER_PREF";
-        promptAndGather(
-          vr,
-          session,
-          "Avez-vous une préférence pour un kiné en particulier ? Vous pouvez me donner son prénom, ou dire peu importe."
-        );
+        promptAndGather(vr, session, getPractitionerPrompt(session));
         return sendTwiml(res, vr);
       }
 
@@ -1271,8 +1573,8 @@ router.post("/voice", async (req, res) => {
       promptAndGather(
         vr,
         session,
-        "Avez-vous une préférence pour un kiné en particulier ? Vous pouvez me donner son prénom, ou dire peu importe.",
-        "Très bien."
+        getPractitionerPrompt(session),
+        pickVariant(session, "type_ack", ["Très bien.", "Parfait.", "D'accord."])
       );
       return sendTwiml(res, vr);
     }
@@ -1281,6 +1583,7 @@ router.post("/voice", async (req, res) => {
       const practitioner = findPractitionerBySpeech(speech, cabinet);
       const noPreference = detectNoPractitionerPreference(speech);
       const usual = detectUsualPractitionerIntent(speech);
+      const yesNo = parseYesNo(speech);
 
       if (practitioner) {
         session.preferredPractitioner = practitioner;
@@ -1288,7 +1591,7 @@ router.post("/voice", async (req, res) => {
         return proposeBookingSlots({ vr, res, session, callSid, cabinet });
       }
 
-      if (noPreference) {
+      if (noPreference || yesNo === false) {
         session.preferredPractitioner = null;
         session.practitionerPreferenceMode = "ANY";
         return proposeBookingSlots({ vr, res, session, callSid, cabinet });
@@ -1302,13 +1605,47 @@ router.post("/voice", async (req, res) => {
         return sendTwiml(res, vr);
       }
 
+      if (yesNo === true) {
+        session.practitionerPreferenceMode = "SPECIFIC";
+        session.step = "BOOK_ASK_SPECIFIC_PRACTITIONER_NAME";
+        promptAndGather(vr, session, "D'accord. Quel est le nom du kiné souhaité ?");
+        return sendTwiml(res, vr);
+      }
+
       const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_PRACTITIONER_PREF");
       if (retry) return retry;
 
       promptAndGather(
         vr,
         session,
-        "Je n’ai pas bien compris. Merci de me dire le prénom du kiné souhaité, ou dites peu importe."
+        "Je n’ai pas bien compris. Répondez simplement par oui, non, ou peu importe."
+      );
+      return sendTwiml(res, vr);
+    }
+
+    if (session.step === "BOOK_ASK_SPECIFIC_PRACTITIONER_NAME") {
+      const practitioner = findPractitionerBySpeech(speech, cabinet);
+      const noPreference = detectNoPractitionerPreference(speech);
+
+      if (practitioner) {
+        session.preferredPractitioner = practitioner;
+        session.practitionerPreferenceMode = "SPECIFIC";
+        return proposeBookingSlots({ vr, res, session, callSid, cabinet });
+      }
+
+      if (noPreference) {
+        session.preferredPractitioner = null;
+        session.practitionerPreferenceMode = "ANY";
+        return proposeBookingSlots({ vr, res, session, callSid, cabinet });
+      }
+
+      const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_SPECIFIC_PRACTITIONER_NAME");
+      if (retry) return retry;
+
+      promptAndGather(
+        vr,
+        session,
+        "Je n’ai pas reconnu le nom du kiné. Merci de me redire son nom, ou dites peu importe."
       );
       return sendTwiml(res, vr);
     }
@@ -1353,8 +1690,6 @@ router.post("/voice", async (req, res) => {
 
       if (wantsRepeat) {
         const a = session.slots?.[0];
-        const b = session.slots?.[1] || session.slots?.[0];
-
         if (!a) {
           sayFr(vr, "Je ne retrouve plus les créneaux proposés. Merci de rappeler le cabinet.");
           sayGoodbye(vr);
@@ -1362,21 +1697,9 @@ router.post("/voice", async (req, res) => {
           return sendTwiml(res, vr);
         }
 
-        sayFr(vr, "Je répète.");
-        sayFr(
-          vr,
-          `Je peux vous proposer ${formatSlotFR(a.start)}${
-            a.practitionerName ? ` avec ${a.practitionerName}` : ""
-          }.`
-        );
-        sayFr(
-          vr,
-          `Ou ${formatSlotFR(b.start)}${
-            b.practitionerName ? ` avec ${b.practitionerName}` : ""
-          }.`
-        );
-
-        promptAndGather(vr, session, "Quel créneau vous convient ?");
+        sayAck(vr, session, "repeat");
+        saySlots(vr, session, session.slots);
+        promptAndGather(vr, session, getSlotSelectionPrompt(session));
         return sendTwiml(res, vr);
       }
 
@@ -1392,7 +1715,7 @@ router.post("/voice", async (req, res) => {
             cabinet,
             requestedDateISO,
             nextStep: "BOOK_PICK_SLOT",
-            intro: "Très bien, je regarde à cette date.",
+            intro: "Je regarde à cette date.",
             emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
           });
         }
@@ -1401,7 +1724,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "D’accord. Parmi les deux autres jours disponibles, lequel vous conviendrait ?"
+          "D'accord. Donnez-moi un autre jour ou un autre horaire qui vous conviendrait."
         );
         return sendTwiml(res, vr);
       }
@@ -1417,7 +1740,7 @@ router.post("/voice", async (req, res) => {
           cabinet,
           requestedDateISO,
           nextStep: "BOOK_PICK_SLOT",
-          intro: "Très bien, je regarde cette date.",
+          intro: "Je regarde cette date.",
           emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
         });
       }
@@ -1438,13 +1761,13 @@ router.post("/voice", async (req, res) => {
         const retry = handleRetry(vr, res, session, callSid, "BOOK_PICK_SLOT");
         if (retry) return retry;
 
-        sayFr(vr, "Je n’ai pas bien compris.");
+        sayAck(vr, session, "sorry");
         sayFr(
           vr,
-          `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou un autre jour.`
+          `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou demander un autre jour.`
         );
 
-        promptAndGather(vr, session, "Quel créneau vous convient ?");
+        promptAndGather(vr, session, getSlotSelectionPrompt(session));
         return sendTwiml(res, vr);
       }
 
@@ -1460,7 +1783,12 @@ router.post("/voice", async (req, res) => {
       session.pendingSlot = slot;
       session.step = "BOOK_ASK_NAME";
 
-      promptAndGather(vr, session, "Quel est votre nom et prénom ?", "Très bien.");
+      promptAndGather(
+        vr,
+        session,
+        "Quel est votre nom et prénom ?",
+        pickVariant(session, "name_intro", ["Très bien.", "Parfait.", "D'accord."])
+      );
       return sendTwiml(res, vr);
     }
 
@@ -1474,7 +1802,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain ou le 18 mars."
+          "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain, le 18 mars, ou mercredi en fin d'après-midi."
         );
         return sendTwiml(res, vr);
       }
@@ -1487,7 +1815,7 @@ router.post("/voice", async (req, res) => {
         cabinet,
         requestedDateISO,
         nextStep: "BOOK_PICK_SLOT",
-        intro: "Très bien, je regarde.",
+        intro: "Je regarde.",
         emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
       });
     }
@@ -1511,7 +1839,12 @@ router.post("/voice", async (req, res) => {
       session.phonePurpose = "BOOK";
       session.step = "BOOK_ASK_PHONE";
 
-      promptAndGather(vr, session, "Quel est votre numéro de téléphone ?", "Merci.");
+      promptAndGather(
+        vr,
+        session,
+        "Quel est votre numéro de téléphone ?",
+        pickVariant(session, "book_phone_intro", ["Merci.", "Parfait, merci.", "C'est noté."])
+      );
       return sendTwiml(res, vr);
     }
 
@@ -1533,11 +1866,7 @@ router.post("/voice", async (req, res) => {
       session.phoneCandidate = phone;
       session.step = "BOOK_CONFIRM_PHONE";
 
-      promptAndGather(
-        vr,
-        session,
-        `Si j’ai bien compris, votre numéro est le ${formatPhoneForSpeech(phone)}. Est-ce correct ?`
-      );
+      promptAndGather(vr, session, getPhoneConfirmPrompt(phone));
       return sendTwiml(res, vr);
     }
 
@@ -1563,7 +1892,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "Très bien. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
+          "D'accord. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
         );
         return sendTwiml(res, vr);
       }
@@ -1589,7 +1918,7 @@ router.post("/voice", async (req, res) => {
             cabinet,
             requestedDateISO,
             nextStep: "BOOK_PICK_ALT",
-            intro: "Très bien, je regarde à cette date.",
+            intro: "Je regarde à cette date.",
             emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
           });
         }
@@ -1598,7 +1927,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "D’accord. Parmi les deux autres jours disponibles, lequel vous conviendrait ?"
+          "D'accord. Donnez-moi un autre jour ou un autre horaire qui vous conviendrait."
         );
         return sendTwiml(res, vr);
       }
@@ -1614,7 +1943,7 @@ router.post("/voice", async (req, res) => {
           cabinet,
           requestedDateISO,
           nextStep: "BOOK_PICK_ALT",
-          intro: "Très bien, je regarde cette date.",
+          intro: "Je regarde cette date.",
           emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
         });
       }
@@ -1628,7 +1957,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour."
+          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou demander un autre jour."
         );
         return sendTwiml(res, vr);
       }
@@ -1724,11 +2053,7 @@ router.post("/voice", async (req, res) => {
       session.phoneCandidate = phone;
       session.step = "MODIFY_CONFIRM_PHONE";
 
-      promptAndGather(
-        vr,
-        session,
-        `Si j’ai bien compris, votre numéro est le ${formatPhoneForSpeech(phone)}. Est-ce correct ?`
-      );
+      promptAndGather(vr, session, getPhoneConfirmPrompt(phone));
       return sendTwiml(res, vr);
     }
 
@@ -1754,7 +2079,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "Très bien. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
+          "D'accord. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
         );
         return sendTwiml(res, vr);
       }
@@ -1826,7 +2151,7 @@ router.post("/voice", async (req, res) => {
           vr,
           session,
           "Quel est votre numéro de téléphone ?",
-          "Très bien, redonnez-moi votre numéro pour vérification."
+          "D'accord, redonnez-moi votre numéro pour vérification."
         );
         return sendTwiml(res, vr);
       }
@@ -1883,12 +2208,14 @@ router.post("/voice", async (req, res) => {
       const result = await suggestTwoSlotsNext7Days({
         practitioners: searchPractitioners,
         durationMinutes: session.appointmentDurationMinutes || undefined,
+        timePreference: session.preferredTimeWindow || undefined,
       });
 
       const slots = Array.isArray(result) ? result : result?.slots || [];
       const proposeSpeech = Array.isArray(result) ? "" : result?.speech || "";
 
-      session.slots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+      const hydratedSlots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+      session.slots = filterSlotsByTimePreference(hydratedSlots, session.preferredTimeWindow);
       rememberLastProposedSlots(session);
 
       if (!session.slots.length) {
@@ -1901,31 +2228,17 @@ router.post("/voice", async (req, res) => {
         return sendTwiml(res, vr);
       }
 
-      sayFr(vr, "D’accord.");
+      sayAck(vr, session, "confirm");
 
       const cleaned = cleanProposeSpeech(proposeSpeech);
-      if (cleaned) {
+      if (cleaned && !session.preferredTimeWindow) {
         sayFr(vr, cleaned);
       } else {
-        const a = session.slots[0];
-        const b = session.slots[1] || session.slots[0];
-
-        sayFr(
-          vr,
-          `Je peux vous proposer ${formatSlotFR(a.start)}${
-            a.practitionerName ? ` avec ${a.practitionerName}` : ""
-          }.`
-        );
-        sayFr(
-          vr,
-          `Ou ${formatSlotFR(b.start)}${
-            b.practitionerName ? ` avec ${b.practitionerName}` : ""
-          }.`
-        );
+        saySlots(vr, session, session.slots);
       }
 
       session.step = "MODIFY_PICK_NEW";
-      promptAndGather(vr, session, "Quel créneau vous convient ?");
+      promptAndGather(vr, session, getSlotSelectionPrompt(session));
       return sendTwiml(res, vr);
     }
 
@@ -1944,7 +2257,7 @@ router.post("/voice", async (req, res) => {
             cabinet,
             requestedDateISO,
             nextStep: "MODIFY_PICK_NEW",
-            intro: "Très bien, je regarde à cette date.",
+            intro: "Je regarde à cette date.",
             emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
           });
         }
@@ -1953,7 +2266,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "D’accord. Parmi les deux autres jours disponibles, lequel vous conviendrait ?"
+          "D'accord. Donnez-moi un autre jour ou un autre horaire qui vous conviendrait."
         );
         return sendTwiml(res, vr);
       }
@@ -1969,7 +2282,7 @@ router.post("/voice", async (req, res) => {
           cabinet,
           requestedDateISO,
           nextStep: "MODIFY_PICK_NEW",
-          intro: "Très bien, je regarde cette date.",
+          intro: "Je regarde cette date.",
           emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
         });
       }
@@ -1983,7 +2296,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour."
+          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou demander un autre jour."
         );
         return sendTwiml(res, vr);
       }
@@ -2068,7 +2381,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain ou le 18 mars."
+          "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain, le 18 mars, ou mercredi en fin d'après-midi."
         );
         return sendTwiml(res, vr);
       }
@@ -2081,7 +2394,7 @@ router.post("/voice", async (req, res) => {
         cabinet,
         requestedDateISO,
         nextStep: "MODIFY_PICK_NEW",
-        intro: "Très bien, je regarde.",
+        intro: "Je regarde.",
         emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
       });
     }
@@ -2107,11 +2420,7 @@ router.post("/voice", async (req, res) => {
       session.phoneCandidate = phone;
       session.step = "CANCEL_CONFIRM_PHONE";
 
-      promptAndGather(
-        vr,
-        session,
-        `Si j’ai bien compris, votre numéro est le ${formatPhoneForSpeech(phone)}. Est-ce correct ?`
-      );
+      promptAndGather(vr, session, getPhoneConfirmPrompt(phone));
       return sendTwiml(res, vr);
     }
 
@@ -2137,7 +2446,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "Très bien. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
+          "D'accord. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
         );
         return sendTwiml(res, vr);
       }
@@ -2199,7 +2508,7 @@ router.post("/voice", async (req, res) => {
           vr,
           session,
           "Quel est votre numéro de téléphone ?",
-          "Très bien, redonnez-moi votre numéro pour vérification."
+          "D'accord, redonnez-moi votre numéro pour vérification."
         );
         return sendTwiml(res, vr);
       }
@@ -2288,7 +2597,7 @@ router.post("/voice", async (req, res) => {
       }
 
       if (!yesNo) {
-        sayFr(vr, "Très bien.");
+        sayAck(vr, session, "confirm");
         sayGoodbye(vr);
         clearSession(callSid);
         return sendTwiml(res, vr);
@@ -2296,6 +2605,10 @@ router.post("/voice", async (req, res) => {
 
       session.step = "BOOK_WELCOME";
       session.lastIntentContext = "BOOK";
+      session.initialBookingSpeech = "";
+      session.pendingSlot = null;
+      session.slots = [];
+      session.requestedDateISO = null;
       vr.redirect({ method: "POST" }, "/twilio/voice");
       return sendTwiml(res, vr);
     }
@@ -2310,7 +2623,11 @@ router.post("/voice", async (req, res) => {
       vr,
       session,
       getGuidedFallbackPrompt(session.step),
-      "Je n’ai pas bien compris."
+      pickVariant(session, "global_fallback_intro", [
+        "Je n’ai pas bien compris.",
+        "Je n'ai pas saisi votre réponse.",
+        "Je préfère vérifier votre demande.",
+      ])
     );
     return sendTwiml(res, vr);
   } catch (err) {
