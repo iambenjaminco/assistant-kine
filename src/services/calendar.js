@@ -20,11 +20,129 @@ const BUSINESS_HOURS = [
 ];
 
 const TIME_PREFERENCE_RULES = {
-  MORNING: { label: "le matin", startHour: 8, endHour: 12 },
-  EARLY_AFTERNOON: { label: "en début d'après-midi", startHour: 12, endHour: 15 },
-  AFTERNOON: { label: "l'après-midi", startHour: 12, endHour: 18 },
-  LATE_AFTERNOON: { label: "en fin d'après-midi", startHour: 16, endHour: 19 },
-  EVENING: { label: "en soirée", startHour: 18, endHour: 21 },
+  MORNING: {
+    key: "MORNING",
+    label: "le matin",
+    keywords: ["matin", "matinee", "matinée", "le matin"],
+    startMinutes: 8 * 60,
+    endMinutes: 12 * 60,
+  },
+  EARLY_AFTERNOON: {
+    key: "EARLY_AFTERNOON",
+    label: "en début d'après-midi",
+    keywords: [
+      "debut d'apres midi",
+      "debut d'apres-midi",
+      "début d'après midi",
+      "début d'après-midi",
+      "en debut d'apres midi",
+      "en debut d'apres-midi",
+      "en début d'après midi",
+      "en début d'après-midi",
+      "vers 14h",
+      "vers 15h",
+    ],
+    startMinutes: 14 * 60,
+    endMinutes: 16 * 60,
+  },
+  AFTERNOON: {
+    key: "AFTERNOON",
+    label: "l'après-midi",
+    keywords: [
+      "apres midi",
+      "apres-midi",
+      "après midi",
+      "après-midi",
+      "aprem",
+      "l'apres midi",
+      "l'apres-midi",
+      "l'après midi",
+      "l'après-midi",
+      "dans l'apres midi",
+      "dans l'apres-midi",
+      "dans l'après midi",
+      "dans l'après-midi",
+    ],
+    startMinutes: 14 * 60,
+    endMinutes: 17 * 60,
+  },
+  LATE_AFTERNOON: {
+    key: "LATE_AFTERNOON",
+    label: "en fin d'après-midi",
+    keywords: [
+      "fin d'apres midi",
+      "fin d'apres-midi",
+      "fin d'après midi",
+      "fin d'après-midi",
+      "en fin d'apres midi",
+      "en fin d'apres-midi",
+      "en fin d'après midi",
+      "en fin d'après-midi",
+      "fin de journee",
+      "fin de journée",
+      "apres le travail",
+      "après le travail",
+      "plus tard",
+      "plus tard dans la journee",
+      "plus tard dans la journée",
+    ],
+    startMinutes: 17 * 60,
+    endMinutes: 19 * 60,
+  },
+  EVENING: {
+    key: "EVENING",
+    label: "en soirée",
+    keywords: ["soir", "soiree", "soirée", "en soiree", "en soirée"],
+    startMinutes: 18 * 60,
+    endMinutes: 21 * 60,
+  },
+};
+
+const PRIORITY_PREFERENCE_RULES = {
+  EARLIEST: {
+    key: "EARLIEST",
+    label: "le plus tôt possible",
+    keywords: [
+      "le plus tot possible",
+      "le plus tôt possible",
+      "au plus vite",
+      "des que possible",
+      "dès que possible",
+      "le premier creneau disponible",
+      "le premier créneau disponible",
+      "au plus tot",
+      "au plus tôt",
+      "le plus vite possible",
+    ],
+  },
+  LATEST: {
+    key: "LATEST",
+    label: "le plus tard possible",
+    keywords: [
+      "le plus tard possible",
+      "le plus tard",
+      "le dernier creneau",
+      "le dernier créneau",
+      "le dernier creneau possible",
+      "le dernier créneau possible",
+      "le plus tardif possible",
+    ],
+  },
+  FLEXIBLE: {
+    key: "FLEXIBLE",
+    label: "n'importe quand",
+    keywords: [
+      "n'importe quand",
+      "nimporte quand",
+      "comme vous voulez",
+      "je suis flexible",
+      "peu importe",
+      "ca m'est egal",
+      "ça m'est égal",
+      "ca m'egal",
+      "ça m'egal",
+    ],
+  },
 };
 
 const slotLocks = new Map();
@@ -172,7 +290,10 @@ function normalizeText(s) {
     .trim()
     .toLowerCase()
     .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "");
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[’']/g, "'")
+    .replace(/-/g, " ")
+    .replace(/\s+/g, " ");
 }
 
 function normalizePhone(s) {
@@ -209,7 +330,26 @@ function extractPhoneFromEvent(ev) {
 }
 
 function getTimePreferenceRule(timePreference) {
-  return TIME_PREFERENCE_RULES[timePreference] || null;
+  if (!timePreference) return null;
+
+  if (typeof timePreference === "string") {
+    return TIME_PREFERENCE_RULES[timePreference] || null;
+  }
+
+  if (
+    typeof timePreference === "object" &&
+    Number.isFinite(timePreference.startMinutes) &&
+    Number.isFinite(timePreference.endMinutes)
+  ) {
+    return timePreference;
+  }
+
+  return null;
+}
+
+function getPriorityPreferenceRule(priorityPreference) {
+  if (!priorityPreference) return null;
+  return PRIORITY_PREFERENCE_RULES[priorityPreference] || null;
 }
 
 function getHourInParis(dateOrIso) {
@@ -242,14 +382,76 @@ function getMinutesInParis(dateOrIso) {
   return hour * 60 + minute;
 }
 
+function parseTargetHourMinutes(text = "") {
+  const t = normalizeText(text);
+
+  const explicitTimeMatch = t.match(/\b(?:vers|a|à)?\s*(\d{1,2})\s*h\s*(\d{2})?\b/);
+  if (explicitTimeMatch) {
+    const hour = parseInt(explicitTimeMatch[1], 10);
+    const minute = explicitTimeMatch[2] ? parseInt(explicitTimeMatch[2], 10) : 0;
+
+    if (
+      Number.isFinite(hour) &&
+      hour >= 0 &&
+      hour <= 23 &&
+      Number.isFinite(minute) &&
+      minute >= 0 &&
+      minute <= 59
+    ) {
+      return hour * 60 + minute;
+    }
+  }
+
+  return null;
+}
+
+function detectTimePreference(text = "") {
+  const t = normalizeText(text);
+
+  for (const rule of Object.values(TIME_PREFERENCE_RULES)) {
+    if (rule.keywords.some((keyword) => t.includes(normalizeText(keyword)))) {
+      return rule;
+    }
+  }
+
+  const targetHourMinutes = parseTargetHourMinutes(t);
+  if (Number.isFinite(targetHourMinutes)) {
+    const hour = Math.floor(targetHourMinutes / 60);
+    const minute = targetHourMinutes % 60;
+    const hh = String(hour).padStart(2, "0");
+    const mm = String(minute).padStart(2, "0");
+
+    return {
+      key: "EXPLICIT_HOUR",
+      label: `vers ${hh}h${mm}`,
+      startMinutes: targetHourMinutes,
+      endMinutes: targetHourMinutes + 60,
+    };
+  }
+
+  return null;
+}
+
+function detectPriorityPreference(text = "") {
+  const t = normalizeText(text);
+
+  for (const rule of Object.values(PRIORITY_PREFERENCE_RULES)) {
+    if (rule.keywords.some((keyword) => t.includes(normalizeText(keyword)))) {
+      return rule;
+    }
+  }
+
+  return null;
+}
+
 function matchesTimePreference(slotStart, timePreference) {
   const rule = getTimePreferenceRule(timePreference);
   if (!rule) return true;
 
-  const hour = getHourInParis(slotStart);
-  if (!Number.isFinite(hour)) return true;
+  const slotMinutes = getMinutesInParis(slotStart);
+  if (!Number.isFinite(slotMinutes)) return true;
 
-  return hour >= rule.startHour && hour < rule.endHour;
+  return slotMinutes >= rule.startMinutes && slotMinutes < rule.endMinutes;
 }
 
 function practitionerSortKey(practitioner) {
@@ -293,24 +495,42 @@ function narrowSlotsAroundTargetHour(slots, targetHourMinutes, maxSuggestions) {
 
   const strictWindow = sorted.filter((slot) => {
     const diff = scoreSlotForTargetHour(slot, targetHourMinutes);
-    return diff <= 90;
+    return diff <= 60;
   });
-  if (strictWindow.length >= maxSuggestions) {
+  if (strictWindow.length >= 1) {
     return strictWindow.slice(0, maxSuggestions);
   }
 
-  const mediumWindow = sorted.filter((slot) => {
+  const acceptableWindow = sorted.filter((slot) => {
     const diff = scoreSlotForTargetHour(slot, targetHourMinutes);
-    return diff <= 150;
+    return diff <= 90;
   });
-  if (mediumWindow.length >= 1) {
-    return mediumWindow.slice(0, maxSuggestions);
+  if (acceptableWindow.length >= 1) {
+    return acceptableWindow.slice(0, maxSuggestions);
   }
 
-  return sorted.slice(0, maxSuggestions);
+  return [];
 }
 
-function buildSlotSpeech(slots, { emptySpeech, timePreference, targetHourMinutes } = {}) {
+function sortAvailableSlotsByPriority(slots, priorityPreference) {
+  const available = [...(slots || [])];
+  const rule = getPriorityPreferenceRule(priorityPreference);
+
+  if (!rule || rule.key === "FLEXIBLE" || rule.key === "EARLIEST") {
+    return available.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+  }
+
+  if (rule.key === "LATEST") {
+    return available.sort((a, b) => new Date(b.start).getTime() - new Date(a.start).getTime());
+  }
+
+  return available.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+}
+
+function buildSlotSpeech(
+  slots,
+  { emptySpeech, timePreference, targetHourMinutes, priorityPreference } = {}
+) {
   const available = slots || [];
 
   if (!available.length) {
@@ -322,6 +542,10 @@ function buildSlotSpeech(slots, { emptySpeech, timePreference, targetHourMinutes
 
     if (timePreference && getTimePreferenceRule(timePreference)) {
       return `Je n’ai pas trouvé de disponibilité ${getTimePreferenceRule(timePreference).label}.`;
+    }
+
+    if (priorityPreference && getPriorityPreferenceRule(priorityPreference)) {
+      return `Je n’ai pas trouvé de disponibilité pour ${getPriorityPreferenceRule(priorityPreference).label}.`;
     }
 
     return emptySpeech || "Je n’ai pas trouvé de disponibilité.";
@@ -351,6 +575,7 @@ function selectAvailableSlots({
   maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
   timePreference = null,
   targetHourMinutes = null,
+  priorityPreference = null,
 }) {
   const orderedPractitioners = buildOrderedPractitioners(practitioners);
   const available = [];
@@ -384,7 +609,13 @@ function selectAvailableSlots({
     return narrowSlotsAroundTargetHour(available, targetHourMinutes, maxSuggestions);
   }
 
-  return available.slice(0, maxSuggestions);
+  const prioritized = sortAvailableSlotsByPriority(available, priorityPreference);
+
+  if (priorityPreference === "LATEST") {
+    return prioritized.slice(0, maxSuggestions).sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+  }
+
+  return prioritized.slice(0, maxSuggestions);
 }
 
 async function createAppointment({
@@ -533,6 +764,7 @@ async function suggestTwoSlotsNext7Days({
   appointmentType,
   timePreference = null,
   targetHourMinutes = null,
+  priorityPreference = null,
   maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
   minLeadMinutes = DEFAULT_MIN_LEAD_MINUTES,
 }) {
@@ -567,6 +799,7 @@ async function suggestTwoSlotsNext7Days({
     maxSuggestions,
     timePreference,
     targetHourMinutes,
+    priorityPreference,
   });
 
   logInfo("SUGGEST_NEXT_7_DAYS", {
@@ -574,8 +807,9 @@ async function suggestTwoSlotsNext7Days({
     days,
     slotMinutes,
     appointmentType: appointmentType || null,
-    timePreference,
+    timePreference: timePreference?.key || timePreference || null,
     targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
+    priorityPreference,
     results: available.map((slot) => ({
       start: slot.start.toISOString(),
       end: slot.end.toISOString(),
@@ -589,6 +823,7 @@ async function suggestTwoSlotsNext7Days({
       emptySpeech: "Je n’ai pas de créneau disponible sur les 7 prochains jours.",
       timePreference,
       targetHourMinutes,
+      priorityPreference,
     }),
   };
 }
@@ -601,6 +836,7 @@ async function suggestTwoSlotsFromDate({
   appointmentType,
   timePreference = null,
   targetHourMinutes = null,
+  priorityPreference = null,
   maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
   minLeadMinutes = DEFAULT_MIN_LEAD_MINUTES,
 }) {
@@ -637,6 +873,7 @@ async function suggestTwoSlotsFromDate({
     maxSuggestions,
     timePreference,
     targetHourMinutes,
+    priorityPreference,
   });
 
   logInfo("SUGGEST_FROM_DATE", {
@@ -645,8 +882,9 @@ async function suggestTwoSlotsFromDate({
     days,
     slotMinutes,
     appointmentType: appointmentType || null,
-    timePreference,
+    timePreference: timePreference?.key || timePreference || null,
     targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
+    priorityPreference,
     results: available.map((slot) => ({
       start: slot.start.toISOString(),
       end: slot.end.toISOString(),
@@ -660,6 +898,7 @@ async function suggestTwoSlotsFromDate({
       emptySpeech: "Je n’ai pas trouvé de disponibilité à partir de cette date.",
       timePreference,
       targetHourMinutes,
+      priorityPreference,
     }),
   };
 }
@@ -793,4 +1032,9 @@ module.exports = {
   addCallbackNoteToEvent,
   cancelAppointmentSafe,
   getTimePreferenceRule,
+  getPriorityPreferenceRule,
+  detectTimePreference,
+  detectPriorityPreference,
+  parseTargetHourMinutes,
+  normalizeText,
 };
