@@ -87,7 +87,7 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
         action: actionUrl,
         method: "POST",
         hints:
-            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, apres-midi, fin d'apres-midi, soir, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous, 17h, 17 heures, 17h30, vers 17h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, 1, 2, 3",
+            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, apres-midi, fin d'apres-midi, soir, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
         ...overrides,
     });
 }
@@ -688,7 +688,9 @@ function detectPriorityPreference(text) {
         t.includes("des que possible") ||
         t.includes("des que vous avez de la place") ||
         t.includes("le premier creneau disponible") ||
-        t.includes("au plus tot")
+        t.includes("au plus tot") ||
+        t.includes("le plus tot possible dans la journee") ||
+        t.includes("tot dans la journee")
     ) {
         return "EARLIEST";
     }
@@ -697,7 +699,8 @@ function detectPriorityPreference(text) {
         t.includes("le plus tard possible") ||
         t.includes("le plus tard") ||
         t.includes("le dernier creneau") ||
-        t.includes("le dernier creneau possible")
+        t.includes("le dernier creneau possible") ||
+        t.includes("le plus tard possible dans la journee")
     ) {
         return "LATEST";
     }
@@ -788,6 +791,20 @@ function describeTimePreference(preference) {
     }
 }
 
+function mentionsWholeDayScope(text) {
+    const t = normalizeText(text);
+    if (!t) return false;
+
+    return (
+        t.includes("dans la journee") ||
+        t.includes("sur la journee") ||
+        t.includes("dans toute la journee") ||
+        t.includes("sur toute la journee") ||
+        t.includes("dans la meme journee") ||
+        t.includes("sur la meme journee")
+    );
+}
+
 function updateTimePreferenceFromSpeech(session, text, { clearOnExplicitNone = false } = {}) {
     const t = normalizeText(text);
     if (!t) return;
@@ -800,32 +817,51 @@ function updateTimePreferenceFromSpeech(session, text, { clearOnExplicitNone = f
         t.includes("aucune preference horaire") ||
         t.includes("pas de preference horaire");
 
+    const wholeDayScope = mentionsWholeDayScope(t);
+    const explicitHour = detectSpecificHourPreference(t);
+    const detectedTimeWindow = detectTimePreference(t);
+    const priority = detectPriorityPreference(t);
+
     if (explicitNone && clearOnExplicitNone) {
         session.preferredTimeWindow = null;
         session.preferredHourMinutes = null;
+        session.priorityPreference = "FLEXIBLE";
+        return;
     }
 
-    const explicitHour = detectSpecificHourPreference(t);
     if (Number.isFinite(explicitHour)) {
         session.preferredHourMinutes = explicitHour;
         session.preferredTimeWindow = inferTimeWindowFromHourMinutes(explicitHour);
-    } else {
-        const detected = detectTimePreference(t);
-        if (detected) {
-            session.preferredTimeWindow = detected;
-            if (clearOnExplicitNone) {
-                session.preferredHourMinutes = null;
-            }
-        }
+        session.priorityPreference = null;
+        return;
     }
 
-    const priority = detectPriorityPreference(t);
     if (priority) {
         session.priorityPreference = priority;
-        if (priority === "FLEXIBLE" && clearOnExplicitNone) {
+        session.preferredHourMinutes = null;
+
+        if (wholeDayScope || priority === "FLEXIBLE") {
             session.preferredTimeWindow = null;
-            session.preferredHourMinutes = null;
+            return;
         }
+
+        if (detectedTimeWindow) {
+            session.preferredTimeWindow = detectedTimeWindow;
+        }
+
+        return;
+    }
+
+    if (detectedTimeWindow) {
+        session.preferredTimeWindow = detectedTimeWindow;
+        session.preferredHourMinutes = null;
+        session.priorityPreference = null;
+        return;
+    }
+
+    if (wholeDayScope && clearOnExplicitNone) {
+        session.preferredTimeWindow = null;
+        session.preferredHourMinutes = null;
     }
 }
 
@@ -833,7 +869,8 @@ function hasPreferenceRefinementRequest(text) {
     return Boolean(
         detectSpecificHourPreference(text) ||
         detectTimePreference(text) ||
-        detectPriorityPreference(text)
+        detectPriorityPreference(text) ||
+        mentionsWholeDayScope(text)
     );
 }
 

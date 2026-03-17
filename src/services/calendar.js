@@ -113,6 +113,10 @@ const PRIORITY_PREFERENCE_RULES = {
       "au plus tot",
       "au plus tôt",
       "le plus vite possible",
+      "le plus tot possible dans la journee",
+      "le plus tôt possible dans la journée",
+      "tot dans la journee",
+      "tôt dans la journée",
     ],
   },
   LATEST: {
@@ -126,6 +130,8 @@ const PRIORITY_PREFERENCE_RULES = {
       "le dernier creneau possible",
       "le dernier créneau possible",
       "le plus tardif possible",
+      "le plus tard possible dans la journee",
+      "le plus tard possible dans la journée",
     ],
   },
   FLEXIBLE: {
@@ -382,6 +388,16 @@ function getMinutesInParis(dateOrIso) {
   return hour * 60 + minute;
 }
 
+function getDateKeyInParis(dateOrIso) {
+  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  return new Intl.DateTimeFormat("fr-CA", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
 function parseTargetHourMinutes(text = "") {
   const t = normalizeText(text);
 
@@ -486,30 +502,105 @@ function sortSlotsByTargetHour(slots, targetHourMinutes) {
   });
 }
 
+function groupSlotsByParisDay(slots) {
+  const groups = new Map();
+
+  for (const slot of slots || []) {
+    const key = getDateKeyInParis(slot.start);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(slot);
+  }
+
+  return groups;
+}
+
+function sortDaySlotsByTargetHour(slots, targetHourMinutes) {
+  return [...(slots || [])].sort((a, b) => {
+    const diffA = scoreSlotForTargetHour(a, targetHourMinutes);
+    const diffB = scoreSlotForTargetHour(b, targetHourMinutes);
+
+    if (diffA !== diffB) return diffA - diffB;
+
+    const aMinutes = getMinutesInParis(a.start);
+    const bMinutes = getMinutesInParis(b.start);
+
+    if (Number.isFinite(aMinutes) && Number.isFinite(bMinutes) && aMinutes !== bMinutes) {
+      return aMinutes - bMinutes;
+    }
+
+    return new Date(a.start).getTime() - new Date(b.start).getTime();
+  });
+}
+
+function pickBestDayForTargetHour(groups, targetHourMinutes) {
+  const entries = [...groups.entries()].map(([dayKey, slots]) => {
+    const sorted = sortDaySlotsByTargetHour(slots, targetHourMinutes);
+    const bestDiff = sorted.length ? scoreSlotForTargetHour(sorted[0], targetHourMinutes) : 9999;
+    const within60 = sorted.filter((slot) => scoreSlotForTargetHour(slot, targetHourMinutes) <= 60).length;
+    const within90 = sorted.filter((slot) => scoreSlotForTargetHour(slot, targetHourMinutes) <= 90).length;
+    const firstStart = sorted.length ? new Date(sorted[0].start).getTime() : Number.MAX_SAFE_INTEGER;
+
+    return {
+      dayKey,
+      slots: sorted,
+      bestDiff,
+      within60,
+      within90,
+      firstStart,
+    };
+  });
+
+  entries.sort((a, b) => {
+    if (a.bestDiff !== b.bestDiff) return a.bestDiff - b.bestDiff;
+    if (a.within60 !== b.within60) return b.within60 - a.within60;
+    if (a.within90 !== b.within90) return b.within90 - a.within90;
+    return a.firstStart - b.firstStart;
+  });
+
+  return entries[0] || null;
+}
+
 function narrowSlotsAroundTargetHour(slots, targetHourMinutes, maxSuggestions) {
   if (!Number.isFinite(targetHourMinutes)) {
     return (slots || []).slice(0, maxSuggestions);
   }
 
   const sorted = sortSlotsByTargetHour(slots, targetHourMinutes);
+  const strictWindow = sorted.filter((slot) => scoreSlotForTargetHour(slot, targetHourMinutes) <= 60);
+  const acceptableWindow = strictWindow.length ? strictWindow : sorted.filter((slot) => scoreSlotForTargetHour(slot, targetHourMinutes) <= 90);
 
-  const strictWindow = sorted.filter((slot) => {
-    const diff = scoreSlotForTargetHour(slot, targetHourMinutes);
-    return diff <= 60;
-  });
-  if (strictWindow.length >= 1) {
-    return strictWindow.slice(0, maxSuggestions);
+  if (!acceptableWindow.length) {
+    return [];
   }
 
-  const acceptableWindow = sorted.filter((slot) => {
-    const diff = scoreSlotForTargetHour(slot, targetHourMinutes);
-    return diff <= 90;
-  });
-  if (acceptableWindow.length >= 1) {
+  const grouped = groupSlotsByParisDay(acceptableWindow);
+  const bestDay = pickBestDayForTargetHour(grouped, targetHourMinutes);
+
+  if (!bestDay) {
     return acceptableWindow.slice(0, maxSuggestions);
   }
 
-  return [];
+  const preferredSameDay = bestDay.slots.slice(0, maxSuggestions);
+  if (preferredSameDay.length >= maxSuggestions) {
+    return preferredSameDay;
+  }
+
+  const usedKeys = new Set(
+    preferredSameDay.map((slot) => `${slot.calendarId}|${new Date(slot.start).toISOString()}|${new Date(slot.end).toISOString()}`)
+  );
+
+  const remaining = acceptableWindow.filter((slot) => {
+    const key = `${slot.calendarId}|${new Date(slot.start).toISOString()}|${new Date(slot.end).toISOString()}`;
+    return !usedKeys.has(key);
+  });
+
+  return [...preferredSameDay, ...remaining.slice(0, Math.max(0, maxSuggestions - preferredSameDay.length))];
+}
+
+function shouldPriorityOverrideTargetHour(priorityPreference) {
+  const rule = getPriorityPreferenceRule(priorityPreference);
+  if (!rule) return false;
+  return rule.key === "EARLIEST" || rule.key === "LATEST" || rule.key === "FLEXIBLE";
 }
 
 function sortAvailableSlotsByPriority(slots, priorityPreference) {
@@ -534,7 +625,7 @@ function buildSlotSpeech(
   const available = slots || [];
 
   if (!available.length) {
-    if (Number.isFinite(targetHourMinutes)) {
+    if (Number.isFinite(targetHourMinutes) && !shouldPriorityOverrideTargetHour(priorityPreference)) {
       const hh = String(Math.floor(targetHourMinutes / 60)).padStart(2, "0");
       const mm = String(targetHourMinutes % 60).padStart(2, "0");
       return `Je n’ai pas trouvé de disponibilité vers ${hh}h${mm}.`;
@@ -605,14 +696,20 @@ function selectAvailableSlots({
 
   if (!available.length) return [];
 
-  if (Number.isFinite(targetHourMinutes)) {
-    return narrowSlotsAroundTargetHour(available, targetHourMinutes, maxSuggestions);
+  const effectiveTargetHourMinutes = shouldPriorityOverrideTargetHour(priorityPreference)
+    ? null
+    : targetHourMinutes;
+
+  if (Number.isFinite(effectiveTargetHourMinutes)) {
+    return narrowSlotsAroundTargetHour(available, effectiveTargetHourMinutes, maxSuggestions);
   }
 
   const prioritized = sortAvailableSlotsByPriority(available, priorityPreference);
 
   if (priorityPreference === "LATEST") {
-    return prioritized.slice(0, maxSuggestions).sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+    return prioritized
+      .slice(0, maxSuggestions)
+      .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
   }
 
   return prioritized.slice(0, maxSuggestions);
@@ -809,6 +906,9 @@ async function suggestTwoSlotsNext7Days({
     appointmentType: appointmentType || null,
     timePreference: timePreference?.key || timePreference || null,
     targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
+    effectiveTargetHourMinutes: shouldPriorityOverrideTargetHour(priorityPreference)
+      ? null
+      : (Number.isFinite(targetHourMinutes) ? targetHourMinutes : null),
     priorityPreference,
     results: available.map((slot) => ({
       start: slot.start.toISOString(),
@@ -822,7 +922,9 @@ async function suggestTwoSlotsNext7Days({
     speech: buildSlotSpeech(available.slice(0, maxSuggestions), {
       emptySpeech: "Je n’ai pas de créneau disponible sur les 7 prochains jours.",
       timePreference,
-      targetHourMinutes,
+      targetHourMinutes: shouldPriorityOverrideTargetHour(priorityPreference)
+        ? null
+        : targetHourMinutes,
       priorityPreference,
     }),
   };
@@ -884,6 +986,9 @@ async function suggestTwoSlotsFromDate({
     appointmentType: appointmentType || null,
     timePreference: timePreference?.key || timePreference || null,
     targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
+    effectiveTargetHourMinutes: shouldPriorityOverrideTargetHour(priorityPreference)
+      ? null
+      : (Number.isFinite(targetHourMinutes) ? targetHourMinutes : null),
     priorityPreference,
     results: available.map((slot) => ({
       start: slot.start.toISOString(),
@@ -897,7 +1002,9 @@ async function suggestTwoSlotsFromDate({
     speech: buildSlotSpeech(available.slice(0, maxSuggestions), {
       emptySpeech: "Je n’ai pas trouvé de disponibilité à partir de cette date.",
       timePreference,
-      targetHourMinutes,
+      targetHourMinutes: shouldPriorityOverrideTargetHour(priorityPreference)
+        ? null
+        : targetHourMinutes,
       priorityPreference,
     }),
   };
