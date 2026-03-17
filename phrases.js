@@ -1,18 +1,43 @@
 const PHRASES = {
-  greeting: "Bonjour, vous êtes bien au cabinet de kinésithérapie.",
+  greeting: "Bonjour, je suis l'assistant du cabinet.",
+  
   askAction: "Souhaitez-vous prendre, modifier ou annuler un rendez-vous ?",
+
   askName: "Quel est votre nom et prénom ?",
 
-  introSlots: "Je peux vous proposer deux créneaux.",
-  chooseSlot: "Lequel des deux vous conviendrait ?",
+  askPhone: "Pouvez-vous me confirmer votre numéro de téléphone ?",
 
-  confirmQuestion: "Souhaitez-vous confirmer ce rendez-vous ? Répondez par oui ou par non.",
+  confirmPhone: "Est-ce bien ce numéro ? Dites oui ou non.",
+
+  confirmQuestion: "Est-ce que ce créneau vous convient ? Dites oui ou non.",
+
+  askSlotChoice: "Quel créneau vous conviendrait ?",
+
+  slotUnavailable: "Désolé, ce créneau n'est plus disponible.",
+
+  noAvailability: "Je n’ai pas de disponibilité dans les prochains jours.",
+
+  modifyAsk: "Quel rendez-vous souhaitez-vous modifier ?",
+
+  cancelAsk: "Quel rendez-vous souhaitez-vous annuler ?",
+
+  confirmCancel: "Êtes-vous sûr de vouloir annuler ce rendez-vous ?",
+
+  appointmentBooked: "Votre rendez-vous est bien confirmé.",
+
+  appointmentModified: "Votre rendez-vous a bien été modifié.",
+
+  appointmentCancelled: "Votre rendez-vous a bien été annulé.",
+
+  notUnderstood: "Je n’ai pas bien compris votre réponse.",
+
+  repeat: "Pouvez-vous répéter s'il vous plaît ?",
+
   confirmed: "C’est confirmé.",
-  goodbye: "À bientôt. Au revoir.",
+  
+errorGeneric: "Une erreur est survenue. Veuillez réessayer plus tard.",
 
-  slotUnavailable: "Ce créneau n’est plus disponible.",
-  noAvailability: "Je n’ai pas de créneau disponible cette semaine.",
-  errorGeneric: "Une erreur est survenue. Merci de réessayer plus tard.",
+  goodbye: "Merci, au revoir."
 };
 
 module.exports = { PHRASES };
