@@ -225,6 +225,23 @@ function getHourInParis(dateOrIso) {
   return Number.isFinite(hour) ? hour : null;
 }
 
+function getMinutesInParis(dateOrIso) {
+  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  const formatter = new Intl.DateTimeFormat("fr-FR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: TIMEZONE,
+  });
+
+  const parts = formatter.formatToParts(d);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value || NaN);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value || NaN);
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return hour * 60 + minute;
+}
+
 function matchesTimePreference(slotStart, timePreference) {
   const rule = getTimePreferenceRule(timePreference);
   if (!rule) return true;
@@ -247,13 +264,66 @@ function buildOrderedPractitioners(practitioners) {
   });
 }
 
-function buildSlotSpeech(slots, { emptySpeech, timePreference } = {}) {
+function scoreSlotForTargetHour(slot, targetHourMinutes) {
+  if (!Number.isFinite(targetHourMinutes)) return 0;
+  const slotMinutes = getMinutesInParis(slot.start);
+  if (!Number.isFinite(slotMinutes)) return 9999;
+  return Math.abs(slotMinutes - targetHourMinutes);
+}
+
+function sortSlotsByTargetHour(slots, targetHourMinutes) {
+  return [...(slots || [])].sort((a, b) => {
+    const diffA = scoreSlotForTargetHour(a, targetHourMinutes);
+    const diffB = scoreSlotForTargetHour(b, targetHourMinutes);
+
+    if (diffA !== diffB) return diffA - diffB;
+
+    const aTime = new Date(a.start).getTime();
+    const bTime = new Date(b.start).getTime();
+    return aTime - bTime;
+  });
+}
+
+function narrowSlotsAroundTargetHour(slots, targetHourMinutes, maxSuggestions) {
+  if (!Number.isFinite(targetHourMinutes)) {
+    return (slots || []).slice(0, maxSuggestions);
+  }
+
+  const sorted = sortSlotsByTargetHour(slots, targetHourMinutes);
+
+  const strictWindow = sorted.filter((slot) => {
+    const diff = scoreSlotForTargetHour(slot, targetHourMinutes);
+    return diff <= 90;
+  });
+  if (strictWindow.length >= maxSuggestions) {
+    return strictWindow.slice(0, maxSuggestions);
+  }
+
+  const mediumWindow = sorted.filter((slot) => {
+    const diff = scoreSlotForTargetHour(slot, targetHourMinutes);
+    return diff <= 150;
+  });
+  if (mediumWindow.length >= 1) {
+    return mediumWindow.slice(0, maxSuggestions);
+  }
+
+  return sorted.slice(0, maxSuggestions);
+}
+
+function buildSlotSpeech(slots, { emptySpeech, timePreference, targetHourMinutes } = {}) {
   const available = slots || [];
 
   if (!available.length) {
+    if (Number.isFinite(targetHourMinutes)) {
+      const hh = String(Math.floor(targetHourMinutes / 60)).padStart(2, "0");
+      const mm = String(targetHourMinutes % 60).padStart(2, "0");
+      return `Je n’ai pas trouvé de disponibilité vers ${hh}h${mm}.`;
+    }
+
     if (timePreference && getTimePreferenceRule(timePreference)) {
       return `Je n’ai pas trouvé de disponibilité ${getTimePreferenceRule(timePreference).label}.`;
     }
+
     return emptySpeech || "Je n’ai pas trouvé de disponibilité.";
   }
 
@@ -280,6 +350,7 @@ function selectAvailableSlots({
   cutoff,
   maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
   timePreference = null,
+  targetHourMinutes = null,
 }) {
   const orderedPractitioners = buildOrderedPractitioners(practitioners);
   const available = [];
@@ -305,11 +376,15 @@ function selectAvailableSlots({
       });
       break;
     }
-
-    if (available.length >= maxSuggestions) break;
   }
 
-  return available;
+  if (!available.length) return [];
+
+  if (Number.isFinite(targetHourMinutes)) {
+    return narrowSlotsAroundTargetHour(available, targetHourMinutes, maxSuggestions);
+  }
+
+  return available.slice(0, maxSuggestions);
 }
 
 async function createAppointment({
@@ -457,6 +532,7 @@ async function suggestTwoSlotsNext7Days({
   durationMinutes,
   appointmentType,
   timePreference = null,
+  targetHourMinutes = null,
   maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
   minLeadMinutes = DEFAULT_MIN_LEAD_MINUTES,
 }) {
@@ -490,6 +566,7 @@ async function suggestTwoSlotsNext7Days({
     cutoff,
     maxSuggestions,
     timePreference,
+    targetHourMinutes,
   });
 
   logInfo("SUGGEST_NEXT_7_DAYS", {
@@ -498,6 +575,7 @@ async function suggestTwoSlotsNext7Days({
     slotMinutes,
     appointmentType: appointmentType || null,
     timePreference,
+    targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
     results: available.map((slot) => ({
       start: slot.start.toISOString(),
       end: slot.end.toISOString(),
@@ -510,6 +588,7 @@ async function suggestTwoSlotsNext7Days({
     speech: buildSlotSpeech(available.slice(0, maxSuggestions), {
       emptySpeech: "Je n’ai pas de créneau disponible sur les 7 prochains jours.",
       timePreference,
+      targetHourMinutes,
     }),
   };
 }
@@ -521,6 +600,7 @@ async function suggestTwoSlotsFromDate({
   durationMinutes,
   appointmentType,
   timePreference = null,
+  targetHourMinutes = null,
   maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
   minLeadMinutes = DEFAULT_MIN_LEAD_MINUTES,
 }) {
@@ -556,6 +636,7 @@ async function suggestTwoSlotsFromDate({
     cutoff: effectiveCutoff,
     maxSuggestions,
     timePreference,
+    targetHourMinutes,
   });
 
   logInfo("SUGGEST_FROM_DATE", {
@@ -565,6 +646,7 @@ async function suggestTwoSlotsFromDate({
     slotMinutes,
     appointmentType: appointmentType || null,
     timePreference,
+    targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
     results: available.map((slot) => ({
       start: slot.start.toISOString(),
       end: slot.end.toISOString(),
@@ -577,6 +659,7 @@ async function suggestTwoSlotsFromDate({
     speech: buildSlotSpeech(available.slice(0, maxSuggestions), {
       emptySpeech: "Je n’ai pas trouvé de disponibilité à partir de cette date.",
       timePreference,
+      targetHourMinutes,
     }),
   };
 }

@@ -78,13 +78,13 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
   return vr.gather({
     input: "speech dtmf",
     language: "fr-FR",
-    speechTimeout: 1,
+    speechTimeout: "auto",
     timeout: 6,
     actionOnEmptyResult: true,
     action: actionUrl,
     method: "POST",
     hints:
-      "prendre rendez-vous, modifier rendez-vous, annuler rendez-vous, premier, deuxième, second, autre jour, autre horaire, matin, après-midi, fin d'après-midi, soir, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous",
+      "prendre rendez-vous, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, annuler rendez-vous, premier, deuxième, second, autre jour, autre horaire, matin, après-midi, fin d'après-midi, soir, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous, 17h, 17 heures, 17h30, vers 17h",
     ...overrides,
   });
 }
@@ -265,6 +265,7 @@ function getSession(callSid) {
       practitionerPreferenceMode: null, // ANY | SPECIFIC | USUAL
       wantsUsualPractitioner: null,
       preferredTimeWindow: null, // MORNING | EARLY_AFTERNOON | AFTERNOON | LATE_AFTERNOON | EVENING
+      preferredHourMinutes: null, // ex: 17h30 => 1050
 
       lastProposedStartISO: null,
       requestedDateISO: null,
@@ -298,6 +299,7 @@ function resetToMenu(session) {
   session.practitionerPreferenceMode = null;
   session.wantsUsualPractitioner = null;
   session.preferredTimeWindow = null;
+  session.preferredHourMinutes = null;
 
   session.lastProposedStartISO = null;
   session.requestedDateISO = null;
@@ -319,7 +321,7 @@ function getGuidedFallbackPrompt(step) {
     case "BOOK_PICK_SLOT":
     case "BOOK_PICK_ALT":
     case "MODIFY_PICK_NEW":
-      return "Vous pouvez me dire le premier, le deuxième, un autre jour, ou un autre horaire.";
+      return "Vous pouvez me dire le premier, le deuxième, ou un autre jour.";
     case "BOOK_ASK_PREFERRED_DATE":
     case "MODIFY_ASK_PREFERRED_DATE":
       return "Vous pouvez dire par exemple demain, jeudi, lundi prochain, le 18 mars, ou mercredi en fin d'après-midi.";
@@ -576,6 +578,43 @@ function isLessThan24h(startISO) {
   return start - now < 24 * 60 * 60 * 1000;
 }
 
+function inferTimeWindowFromHourMinutes(hourMinutes) {
+  if (!Number.isFinite(hourMinutes)) return null;
+  const hour = Math.floor(hourMinutes / 60);
+
+  if (hour < 12) return "MORNING";
+  if (hour < 15) return "EARLY_AFTERNOON";
+  if (hour < 16) return "AFTERNOON";
+  if (hour < 18) return "LATE_AFTERNOON";
+  return "EVENING";
+}
+
+function detectSpecificHourPreference(text) {
+  const t = normalizeText(text);
+  if (!t) return null;
+
+  let match =
+    t.match(/\b(\d{1,2})\s*h\s*(\d{2})?\b/) ||
+    t.match(/\b(\d{1,2})\s*heure(?:s)?\s*(\d{2})?\b/);
+
+  if (!match) {
+    match = t.match(
+      /\b(?:vers|autour de|aux alentours de|plutot vers|plutot autour de)\s+(\d{1,2})(?::(\d{2}))?\b/
+    );
+  }
+
+  if (!match) return null;
+
+  const hour = Number(match[1]);
+  const minutes = Number(match[2] || 0);
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minutes)) return null;
+  if (hour < 7 || hour > 21) return null;
+  if (minutes < 0 || minutes > 59) return null;
+
+  return hour * 60 + minutes;
+}
+
 function detectTimePreference(text) {
   const t = normalizeText(text);
   if (!t) return null;
@@ -586,7 +625,10 @@ function detectTimePreference(text) {
     t.includes("fin d apres midi") ||
     t.includes("en fin d'apres midi") ||
     t.includes("en fin dapres midi") ||
-    t.includes("fin de journee")
+    t.includes("fin de journee") ||
+    t.includes("fin d'aprem") ||
+    t.includes("fin daprem") ||
+    t.includes("fin d aprem")
   ) {
     return "LATE_AFTERNOON";
   }
@@ -601,7 +643,11 @@ function detectTimePreference(text) {
     return "EARLY_AFTERNOON";
   }
 
-  if (t.includes("soir") || t.includes("en soiree") || t.includes("fin de soiree")) {
+  if (
+    t.includes("soir") ||
+    t.includes("en soiree") ||
+    t.includes("fin de soiree")
+  ) {
     return "EVENING";
   }
 
@@ -609,7 +655,13 @@ function detectTimePreference(text) {
     return "MORNING";
   }
 
-  if (t.includes("apres midi") || t.includes("apres-midi") || t.includes("apresmidi")) {
+  if (
+    t.includes("apres midi") ||
+    t.includes("apres-midi") ||
+    t.includes("apresmidi") ||
+    t.includes("dans l'apres midi") ||
+    t.includes("dans lapres midi")
+  ) {
     return "AFTERNOON";
   }
 
@@ -625,6 +677,21 @@ function getHourInParis(startISO) {
 
   const hour = Number(parts.find((p) => p.type === "hour")?.value || NaN);
   return Number.isFinite(hour) ? hour : null;
+}
+
+function getMinutesInParis(startISO) {
+  const parts = new Intl.DateTimeFormat("fr-FR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: PARIS_TIMEZONE,
+  }).formatToParts(new Date(startISO));
+
+  const hour = Number(parts.find((p) => p.type === "hour")?.value || NaN);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value || NaN);
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return hour * 60 + minute;
 }
 
 function slotMatchesTimePreference(slot, preference) {
@@ -685,12 +752,23 @@ function updateTimePreferenceFromSpeech(session, text, { clearOnExplicitNone = f
 
   if (explicitNone && clearOnExplicitNone) {
     session.preferredTimeWindow = null;
+    session.preferredHourMinutes = null;
+    return;
+  }
+
+  const explicitHour = detectSpecificHourPreference(t);
+  if (Number.isFinite(explicitHour)) {
+    session.preferredHourMinutes = explicitHour;
+    session.preferredTimeWindow = inferTimeWindowFromHourMinutes(explicitHour);
     return;
   }
 
   const detected = detectTimePreference(t);
   if (detected) {
     session.preferredTimeWindow = detected;
+    if (clearOnExplicitNone) {
+      session.preferredHourMinutes = null;
+    }
   }
 }
 
@@ -715,14 +793,23 @@ function parseYesNo(text) {
     /c'?est pas mon rendez/,
     /mauvais numero/,
     /pas le bon/,
+    /^pas bon$/,
+    /^faux$/,
+    /^negative?$/,
   ];
 
   const yesPatterns = [
     /\boui\b/,
     /\bouais\b/,
+    /\bouep\b/,
+    /\boh oui\b/,
+    /\bben oui\b/,
+    /\bbah oui\b/,
     /\byes\b/,
     /c'?est ca/,
     /c est ca/,
+    /c'?est bien ca/,
+    /c'?est bien cela/,
     /exact/,
     /exactement/,
     /correct/,
@@ -734,13 +821,24 @@ function parseYesNo(text) {
     /c'?est mon numero/,
     /c'?est bien mon rendez/,
     /c'?est bien mon rdv/,
-    /c'?est bien cela/,
     /ca me va/,
     /cela me va/,
     /^ok$/,
+    /^okay$/,
+    /^ok oui$/,
     /^daccord$/,
     /^d accord$/,
+    /^dac$/,
+    /^c bon$/,
+    /^c'est bon$/,
+    /^tres bien$/,
+    /^parfait$/,
+    /^oui oui$/,
     /je confirme/,
+    /confirme/,
+    /valide/,
+    /c'est valide/,
+    /tout bon/,
   ];
 
   const no = noPatterns.some((pattern) => pattern.test(t));
@@ -749,6 +847,48 @@ function parseYesNo(text) {
   if (yes && !no) return true;
   if (no && !yes) return false;
   return null;
+}
+
+function detectBookingIntent(text) {
+  const t = normalizeText(text);
+  if (!t) return false;
+
+  return (
+    t.includes("prendre") ||
+    t.includes("reprendre") ||
+    t.includes("reserver") ||
+    t.includes("reserver un rendez") ||
+    t.includes("booker") ||
+    t.includes("fixer un rendez") ||
+    t.includes("un rendez") ||
+    t.includes("rdv") ||
+    t.includes("creneau") ||
+    t.includes("consult")
+  );
+}
+
+function detectModifyIntent(text) {
+  const t = normalizeText(text);
+  if (!t) return false;
+
+  return (
+    t.includes("modifier") ||
+    t.includes("changer") ||
+    t.includes("decaler") ||
+    t.includes("deplacer") ||
+    t.includes("reporter")
+  );
+}
+
+function detectCancelIntent(text) {
+  const t = normalizeText(text);
+  if (!t) return false;
+
+  return (
+    t.includes("annuler") ||
+    t.includes("supprimer") ||
+    t.includes("retirer")
+  );
 }
 
 function detectAppointmentType(text) {
@@ -888,6 +1028,8 @@ function pickChoiceFromSpeech(text, digits, slots = []) {
     const bDay = normalizeText(getSlotWeekdayFR(b.start));
     const aHm = normalizeText(getSlotHourMinuteFR(a.start).replace(":", "h"));
     const bHm = normalizeText(getSlotHourMinuteFR(b.start).replace(":", "h"));
+    const aHourOnly = `${String(getHourInParis(a.start)).padStart(2, "0")}h`;
+    const bHourOnly = `${String(getHourInParis(b.start)).padStart(2, "0")}h`;
     const aName = normalizeText(a.practitionerName || "");
     const bName = normalizeText(b.practitionerName || "");
 
@@ -896,6 +1038,9 @@ function pickChoiceFromSpeech(text, digits, slots = []) {
 
     if (aHm && (t.includes(aHm) || t.includes(aHm.replace("h", " h ")))) return 0;
     if (bHm && (t.includes(bHm) || t.includes(bHm.replace("h", " h ")))) return 1;
+
+    if (aHourOnly && t.includes(aHourOnly) && (!bHourOnly || !t.includes(bHourOnly))) return 0;
+    if (bHourOnly && t.includes(bHourOnly) && (!aHourOnly || !t.includes(aHourOnly))) return 1;
 
     if (aName && t.includes(aName) && (!bName || !t.includes(bName))) return 0;
     if (bName && t.includes(bName) && (!aName || !t.includes(aName))) return 1;
@@ -967,12 +1112,14 @@ async function lookupSlotsFromDate({
   fromDateISO,
   appointmentDurationMinutes,
   timePreference,
+  targetHourMinutes,
 }) {
   const result = await suggestTwoSlotsFromDate({
     practitioners,
     fromDate: fromDateISO,
     durationMinutes: appointmentDurationMinutes || undefined,
     timePreference: timePreference || undefined,
+    targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : undefined,
   });
 
   if (Array.isArray(result)) {
@@ -986,17 +1133,11 @@ async function lookupSlotsFromDate({
 }
 
 function getSlotSelectionPrompt(session) {
-  const base = [
+  return pickVariant(session, "slot_selection_prompt", [
     "Quel créneau vous convient ?",
     "Lequel vous conviendrait ?",
     "Quel créneau préférez-vous ?",
-  ];
-
-  if (session.preferredTimeWindow) {
-    return `${pickVariant(session, "slot_selection_prompt", base)} Vous pouvez aussi demander un autre jour ou un autre horaire.`;
-  }
-
-  return `${pickVariant(session, "slot_selection_prompt", base)} Vous pouvez aussi demander un autre jour.`;
+  ]);
 }
 
 function getPractitionerPrompt(session) {
@@ -1074,6 +1215,7 @@ async function proposeSlotsFromRequestedDate({
     fromDateISO: requestedDateISO,
     appointmentDurationMinutes: session.appointmentDurationMinutes,
     timePreference: session.preferredTimeWindow,
+    targetHourMinutes: session.preferredHourMinutes,
   });
 
   const hydratedSlots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
@@ -1090,6 +1232,7 @@ async function proposeSlotsFromRequestedDate({
     appointmentDurationMinutes: session.appointmentDurationMinutes,
     preferredPractitioner: session.preferredPractitioner?.name || null,
     preferredTimeWindow: session.preferredTimeWindow || null,
+    preferredHourMinutes: session.preferredHourMinutes || null,
     count: session.slots.length,
     slots: summarizeSlots(session.slots),
     context: session.lastIntentContext,
@@ -1119,7 +1262,7 @@ async function proposeSlotsFromRequestedDate({
   if (intro) sayFr(vr, intro);
 
   const cleaned = cleanProposeSpeech(proposeSpeech);
-  if (cleaned && !session.preferredTimeWindow) {
+  if (cleaned && !session.preferredTimeWindow && !Number.isFinite(session.preferredHourMinutes)) {
     sayFr(vr, cleaned);
   } else {
     saySlots(vr, session, session.slots);
@@ -1147,6 +1290,7 @@ async function proposeBookingSlots({
     appointmentType: session.appointmentType,
     appointmentDurationMinutes: session.appointmentDurationMinutes,
     preferredTimeWindow: session.preferredTimeWindow || null,
+    preferredHourMinutes: session.preferredHourMinutes || null,
     fromDateISO,
   });
 
@@ -1156,11 +1300,17 @@ async function proposeBookingSlots({
         fromDate: fromDateISO,
         durationMinutes: session.appointmentDurationMinutes || undefined,
         timePreference: session.preferredTimeWindow || undefined,
+        targetHourMinutes: Number.isFinite(session.preferredHourMinutes)
+          ? session.preferredHourMinutes
+          : undefined,
       })
     : await suggestTwoSlotsNext7Days({
         practitioners: searchPractitioners,
         durationMinutes: session.appointmentDurationMinutes || undefined,
         timePreference: session.preferredTimeWindow || undefined,
+        targetHourMinutes: Number.isFinite(session.preferredHourMinutes)
+          ? session.preferredHourMinutes
+          : undefined,
       });
 
   const slots = Array.isArray(result) ? result : result?.slots || [];
@@ -1183,6 +1333,7 @@ async function proposeBookingSlots({
     preferredPractitioner: session.preferredPractitioner?.name || null,
     appointmentType: session.appointmentType,
     preferredTimeWindow: session.preferredTimeWindow || null,
+    preferredHourMinutes: session.preferredHourMinutes || null,
   });
 
   if (!session.slots.length) {
@@ -1212,7 +1363,7 @@ async function proposeBookingSlots({
   }
 
   const cleaned = cleanProposeSpeech(proposeSpeech);
-  if (cleaned && !session.preferredTimeWindow) {
+  if (cleaned && !session.preferredTimeWindow && !Number.isFinite(session.preferredHourMinutes)) {
     sayFr(vr, cleaned);
   } else {
     saySlots(vr, session, session.slots);
@@ -1322,6 +1473,7 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
     fromDateISO: slot.start,
     appointmentDurationMinutes: session.appointmentDurationMinutes,
     timePreference: session.preferredTimeWindow,
+    targetHourMinutes: session.preferredHourMinutes,
   });
 
   const hydratedAltSlots = hydrateSlotsWithDefaultPractitioner(altSlots, cabinet);
@@ -1434,23 +1586,9 @@ router.post("/voice", async (req, res) => {
         return sendTwiml(res, vr);
       }
 
-      const wantsModify =
-        text.includes("modifier") ||
-        text.includes("changer") ||
-        text.includes("decaler") ||
-        text.includes("deplacer") ||
-        text.includes("reporter");
-
-      const wantsCancel =
-        text.includes("annuler") ||
-        text.includes("supprimer") ||
-        text.includes("retirer");
-
-      const wantsBook =
-        text.includes("prendre") ||
-        text.includes("rendez") ||
-        text.includes("rdv") ||
-        text.includes("consult");
+      const wantsModify = detectModifyIntent(text);
+      const wantsCancel = detectCancelIntent(text);
+      const wantsBook = detectBookingIntent(text);
 
       if (wantsModify) {
         session.phonePurpose = "MODIFY";
@@ -1764,7 +1902,7 @@ router.post("/voice", async (req, res) => {
         sayAck(vr, session, "sorry");
         sayFr(
           vr,
-          `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou demander un autre jour.`
+          `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou un autre jour.`
         );
 
         promptAndGather(vr, session, getSlotSelectionPrompt(session));
@@ -1957,7 +2095,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou demander un autre jour."
+          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour."
         );
         return sendTwiml(res, vr);
       }
@@ -2209,6 +2347,9 @@ router.post("/voice", async (req, res) => {
         practitioners: searchPractitioners,
         durationMinutes: session.appointmentDurationMinutes || undefined,
         timePreference: session.preferredTimeWindow || undefined,
+        targetHourMinutes: Number.isFinite(session.preferredHourMinutes)
+          ? session.preferredHourMinutes
+          : undefined,
       });
 
       const slots = Array.isArray(result) ? result : result?.slots || [];
@@ -2231,7 +2372,7 @@ router.post("/voice", async (req, res) => {
       sayAck(vr, session, "confirm");
 
       const cleaned = cleanProposeSpeech(proposeSpeech);
-      if (cleaned && !session.preferredTimeWindow) {
+      if (cleaned && !session.preferredTimeWindow && !Number.isFinite(session.preferredHourMinutes)) {
         sayFr(vr, cleaned);
       } else {
         saySlots(vr, session, session.slots);
@@ -2296,7 +2437,7 @@ router.post("/voice", async (req, res) => {
         promptAndGather(
           vr,
           session,
-          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou demander un autre jour."
+          "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour."
         );
         return sendTwiml(res, vr);
       }
@@ -2583,8 +2724,9 @@ router.post("/voice", async (req, res) => {
 
     if (session.step === "CANCEL_ASK_REBOOK") {
       const yesNo = parseYesNo(speech);
+      const wantsBook = detectBookingIntent(speech);
 
-      if (yesNo === null) {
+      if (yesNo === null && !wantsBook) {
         const retry = handleRetry(vr, res, session, callSid, "CANCEL_ASK_REBOOK");
         if (retry) return retry;
 
@@ -2596,7 +2738,7 @@ router.post("/voice", async (req, res) => {
         return sendTwiml(res, vr);
       }
 
-      if (!yesNo) {
+      if (yesNo === false) {
         sayAck(vr, session, "confirm");
         sayGoodbye(vr);
         clearSession(callSid);
@@ -2605,7 +2747,7 @@ router.post("/voice", async (req, res) => {
 
       session.step = "BOOK_WELCOME";
       session.lastIntentContext = "BOOK";
-      session.initialBookingSpeech = "";
+      session.initialBookingSpeech = speech || "";
       session.pendingSlot = null;
       session.slots = [];
       session.requestedDateISO = null;
