@@ -79,7 +79,7 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
     input: "speech dtmf",
     language: "fr-FR",
     speechTimeout: "auto",
-    timeout: 6,
+    timeout: 8,
     actionOnEmptyResult: true,
     action: actionUrl,
     method: "POST",
@@ -249,7 +249,7 @@ function getSession(callSid) {
       patientName: "",
       phone: "",
       phoneCandidate: "",
-      phonePurpose: null, // BOOK | MODIFY | CANCEL
+      phonePurpose: null,
       pendingSlot: null,
       foundEvent: null,
       createdAt: Date.now(),
@@ -259,17 +259,17 @@ function getSession(callSid) {
       variantCursor: {},
 
       initialBookingSpeech: "",
-      appointmentType: null, // FIRST | FOLLOW_UP
+      appointmentType: null,
       appointmentDurationMinutes: null,
       preferredPractitioner: null,
-      practitionerPreferenceMode: null, // ANY | SPECIFIC | USUAL
+      practitionerPreferenceMode: null,
       wantsUsualPractitioner: null,
-      preferredTimeWindow: null, // MORNING | EARLY_AFTERNOON | AFTERNOON | LATE_AFTERNOON | EVENING
-      preferredHourMinutes: null, // ex: 17h30 => 1050
+      preferredTimeWindow: null,
+      preferredHourMinutes: null,
 
       lastProposedStartISO: null,
       requestedDateISO: null,
-      lastIntentContext: null, // BOOK | MODIFY
+      lastIntentContext: null,
     });
   }
   return sessions.get(callSid);
@@ -391,10 +391,6 @@ function handleRetry(vr, res, session, callSid, reason = "UNKNOWN") {
 
   return null;
 }
-
-// =========================
-// Helpers date / alternatives
-// =========================
 
 function addDays(date, days) {
   const d = new Date(date);
@@ -772,10 +768,6 @@ function updateTimePreferenceFromSpeech(session, text, { clearOnExplicitNone = f
   }
 }
 
-// =========================
-// Helpers métier
-// =========================
-
 function parseYesNo(text) {
   const t = normalizeText(text);
   if (!t) return null;
@@ -857,7 +849,6 @@ function detectBookingIntent(text) {
     t.includes("prendre") ||
     t.includes("reprendre") ||
     t.includes("reserver") ||
-    t.includes("reserver un rendez") ||
     t.includes("booker") ||
     t.includes("fixer un rendez") ||
     t.includes("un rendez") ||
@@ -1044,27 +1035,6 @@ function pickChoiceFromSpeech(text, digits, slots = []) {
 
     if (aName && t.includes(aName) && (!bName || !t.includes(bName))) return 0;
     if (bName && t.includes(bName) && (!aName || !t.includes(aName))) return 1;
-
-    const aHour = Number(getSlotHourMinuteFR(a.start).split(":")[0]);
-    const bHour = Number(getSlotHourMinuteFR(b.start).split(":")[0]);
-
-    if (t.includes("matin") && aHour < 12 && !(bHour < 12)) return 0;
-    if (t.includes("matin") && bHour < 12 && !(aHour < 12)) return 1;
-
-    if (
-      (t.includes("apres midi") || t.includes("apres-midi")) &&
-      aHour >= 12 &&
-      !(bHour >= 12)
-    ) {
-      return 0;
-    }
-    if (
-      (t.includes("apres midi") || t.includes("apres-midi")) &&
-      bHour >= 12 &&
-      !(aHour >= 12)
-    ) {
-      return 1;
-    }
   }
 
   return null;
@@ -1498,13 +1468,16 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
   return sendTwiml(res, vr);
 }
 
-// Webhook principal
 router.post("/voice", async (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const vr = new VoiceResponse();
 
   const callSid = safeCallSid(req);
-  const speech = (req.body?.SpeechResult || "").trim();
+  const speech = (
+    req.body?.SpeechResult ||
+    req.body?.UnstableSpeechResult ||
+    ""
+  ).trim();
   const digits = (req.body?.Digits || "").trim();
 
   const session = getSession(callSid);
@@ -1513,8 +1486,11 @@ router.post("/voice", async (req, res) => {
     callSid,
     step: session.step,
     speech,
+    unstableSpeech: req.body?.UnstableSpeechResult || "",
     digits,
+    confidence: req.body?.Confidence || null,
     hasInput: Boolean(speech || digits),
+    rawBody: req.body,
   });
 
   const cabinet = getCabinetOrFail(vr);
@@ -1547,6 +1523,13 @@ router.post("/voice", async (req, res) => {
   if (!hasInput && session.lastPrompt) {
     session.noInputCount = (session.noInputCount || 0) + 1;
 
+    logWarn("NO_INPUT_DETECTED", {
+      callSid,
+      step: session.step,
+      noInputCount: session.noInputCount,
+      rawBody: req.body,
+    });
+
     if (session.noInputCount === 1) {
       promptAndGather(vr, session, session.lastPrompt, getNoInputIntro(session.step));
       return sendTwiml(res, vr);
@@ -1565,9 +1548,6 @@ router.post("/voice", async (req, res) => {
   }
 
   try {
-    // =========================
-    // 0) ACTION (menu)
-    // =========================
     if (session.step === "ACTION") {
       const text = normalizeText(speech);
 
@@ -1586,9 +1566,28 @@ router.post("/voice", async (req, res) => {
         return sendTwiml(res, vr);
       }
 
-      const wantsModify = detectModifyIntent(text);
-      const wantsCancel = detectCancelIntent(text);
-      const wantsBook = detectBookingIntent(text);
+      const wantsModify =
+        text.includes("modifier") ||
+        text.includes("changer") ||
+        text.includes("decaler") ||
+        text.includes("deplacer") ||
+        text.includes("reporter");
+
+      const wantsCancel =
+        text.includes("annuler") ||
+        text.includes("supprimer") ||
+        text.includes("retirer");
+
+      const wantsBook =
+        text.includes("prendre") ||
+        text.includes("reprendre") ||
+        text.includes("reserver") ||
+        text.includes("booker") ||
+        text.includes("fixer un rendez") ||
+        text.includes("rendez") ||
+        text.includes("rdv") ||
+        text.includes("consult") ||
+        text.includes("creneau");
 
       if (wantsModify) {
         session.phonePurpose = "MODIFY";
@@ -1628,9 +1627,6 @@ router.post("/voice", async (req, res) => {
       return sendTwiml(res, vr);
     }
 
-    // =========================
-    // A) PRENDRE RDV
-    // =========================
     if (session.step === "BOOK_WELCOME") {
       session.lastIntentContext = "BOOK";
       const seed = session.initialBookingSpeech || "";
@@ -2170,9 +2166,6 @@ router.post("/voice", async (req, res) => {
       return sendTwiml(res, vr);
     }
 
-    // =========================
-    // B) MODIFIER RDV
-    // =========================
     if (session.step === "MODIFY_ASK_PHONE") {
       const phone = parsePhone(speech, digits);
 
@@ -2540,9 +2533,6 @@ router.post("/voice", async (req, res) => {
       });
     }
 
-    // =========================
-    // C) ANNULER RDV
-    // =========================
     if (session.step === "CANCEL_ASK_PHONE") {
       const phone = parsePhone(speech, digits);
 
@@ -2724,7 +2714,16 @@ router.post("/voice", async (req, res) => {
 
     if (session.step === "CANCEL_ASK_REBOOK") {
       const yesNo = parseYesNo(speech);
-      const wantsBook = detectBookingIntent(speech);
+      const wantsBook =
+        speech &&
+        (
+          normalizeText(speech).includes("prendre") ||
+          normalizeText(speech).includes("reprendre") ||
+          normalizeText(speech).includes("reserver") ||
+          normalizeText(speech).includes("booker") ||
+          normalizeText(speech).includes("rendez") ||
+          normalizeText(speech).includes("rdv")
+        );
 
       if (yesNo === null && !wantsBook) {
         const retry = handleRetry(vr, res, session, callSid, "CANCEL_ASK_REBOOK");
@@ -2755,9 +2754,6 @@ router.post("/voice", async (req, res) => {
       return sendTwiml(res, vr);
     }
 
-    // =========================
-    // Fallback
-    // =========================
     const retry = handleRetry(vr, res, session, callSid, "FALLBACK");
     if (retry) return retry;
 
