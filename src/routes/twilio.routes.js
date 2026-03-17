@@ -1637,6 +1637,7 @@ router.post("/voice", async (req, res) => {
                 session.lastIntentContext = "BOOK";
                 session.initialBookingSpeech = speech || "";
                 session.step = "BOOK_WELCOME";
+                setPrompt(session, "");
                 vr.redirect({ method: "POST" }, "/twilio/voice");
                 return sendTwiml(res, vr);
             }
@@ -2255,6 +2256,7 @@ router.post("/voice", async (req, res) => {
             session.phoneCandidate = "";
             session.step = "MODIFY_FIND_APPT";
             session.lastIntentContext = "MODIFY";
+            setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
             return sendTwiml(res, vr);
         }
@@ -2363,6 +2365,7 @@ router.post("/voice", async (req, res) => {
             }
 
             session.step = "MODIFY_PROPOSE_NEW";
+            setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
             return sendTwiml(res, vr);
         }
@@ -2620,6 +2623,7 @@ router.post("/voice", async (req, res) => {
             session.phone = session.phoneCandidate;
             session.phoneCandidate = "";
             session.step = "CANCEL_FIND_APPT";
+            setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
             return sendTwiml(res, vr);
         }
@@ -2785,6 +2789,7 @@ router.post("/voice", async (req, res) => {
             session.pendingSlot = null;
             session.slots = [];
             session.requestedDateISO = null;
+            setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
             return sendTwiml(res, vr);
         }
