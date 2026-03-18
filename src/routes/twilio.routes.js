@@ -87,7 +87,7 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
         action: actionUrl,
         method: "POST",
         hints:
-            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, apres-midi, fin d'apres-midi, soir, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
+            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, apres-midi, fin d'apres-midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
         ...overrides,
     });
 }
@@ -601,6 +601,11 @@ function inferTimeWindowFromHourMinutes(hourMinutes) {
 function detectSpecificHourPreference(text) {
     const t = normalizeText(text);
     if (!t) return null;
+
+    if (t.includes("midi et demi")) return 12 * 60 + 30;
+    if (t.includes("midi trente")) return 12 * 60 + 30;
+    if (t.includes("midi")) return 12 * 60;
+    if (t.includes("minuit")) return 0;
 
     let match =
         t.match(/\b(\d{1,2})\s*h\s*(\d{2})?\b/) ||
@@ -1245,12 +1250,19 @@ async function lookupSlotsFromDate({
     });
 
     if (Array.isArray(result)) {
-        return { slots: result, speech: "" };
+        return {
+            slots: result,
+            speech: "",
+            status: null,
+            context: {},
+        };
     }
 
     return {
         slots: result?.slots || [],
         speech: result?.speech || "",
+        status: result?.status || null,
+        context: result?.context || {},
     };
 }
 
@@ -1330,7 +1342,7 @@ async function proposeSlotsFromRequestedDate({
 }) {
     const searchPractitioners = getSearchPractitioners(session, cabinet);
 
-    const { slots, speech: proposeSpeech } = await lookupSlotsFromDate({
+    const { slots, speech: proposeSpeech, status, context } = await lookupSlotsFromDate({
         practitioners: searchPractitioners,
         fromDateISO: requestedDateISO,
         appointmentDurationMinutes: session.appointmentDurationMinutes,
@@ -1355,9 +1367,11 @@ async function proposeSlotsFromRequestedDate({
         preferredTimeWindow: session.preferredTimeWindow || null,
         preferredHourMinutes: session.preferredHourMinutes || null,
         priorityPreference: session.priorityPreference || null,
+        status,
+        context,
         count: session.slots.length,
         slots: summarizeSlots(session.slots),
-        context: session.lastIntentContext,
+        contextType: session.lastIntentContext,
     });
 
     if (!session.slots.length) {
@@ -1366,19 +1380,39 @@ async function proposeSlotsFromRequestedDate({
                 ? "MODIFY_ASK_PREFERRED_DATE"
                 : "BOOK_ASK_PREFERRED_DATE";
 
-        const noAvailabilityPrompt = filtered.hasTimeFilterMiss
-            ? `Je n'ai pas trouvé de disponibilité ${describeTimePreference(session.preferredTimeWindow)} à cette date. Donnez-moi un autre jour ou un autre horaire qui vous conviendrait.`
-            : "Je n’ai pas trouvé de disponibilité à cette date. Donnez-moi un autre jour qui vous conviendrait.";
+        let introSpeech =
+            filtered.hasTimeFilterMiss
+                ? `Je n'ai rien trouvé ${describeTimePreference(session.preferredTimeWindow)}.`
+                : "Je n’ai pas trouvé de disponibilité à cette date.";
+
+        let noAvailabilityPrompt =
+            filtered.hasTimeFilterMiss
+                ? `Je n'ai pas trouvé de disponibilité ${describeTimePreference(session.preferredTimeWindow)} à cette date. Donnez-moi un autre jour ou un autre horaire qui vous conviendrait.`
+                : "Je n’ai pas trouvé de disponibilité à cette date. Donnez-moi un autre jour qui vous conviendrait.";
+
+        if (status === "CABINET_CLOSED_DAY") {
+            introSpeech = proposeSpeech || "Le cabinet est fermé ce jour-là.";
+            noAvailabilityPrompt =
+                "Donnez-moi un autre jour qui vous conviendrait.";
+        }
+
+        if (status === "OUTSIDE_OPENING_HOURS") {
+            introSpeech = proposeSpeech || "Le cabinet est fermé à cet horaire.";
+            noAvailabilityPrompt =
+                "Donnez-moi un autre horaire ou un autre jour qui vous conviendrait.";
+        }
 
         promptAndGather(
             vr,
             session,
             noAvailabilityPrompt,
-            filtered.hasTimeFilterMiss
-                ? `Je n'ai rien trouvé ${describeTimePreference(session.preferredTimeWindow)}.`
-                : "Je n’ai pas trouvé de disponibilité à cette date."
+            introSpeech
         );
         return sendTwiml(res, vr);
+    }
+
+    if (status === "REQUESTED_TIME_TAKEN_SAME_DAY_ALTERNATIVES") {
+        sayFr(vr, "Le créneau demandé n’est plus disponible, mais j’ai d’autres horaires le même jour.");
     }
 
     if (intro) sayFr(vr, intro);
@@ -1446,6 +1480,9 @@ async function proposeBookingSlots({
     const slots = Array.isArray(result) ? result : result?.slots || [];
     const proposeSpeech = Array.isArray(result) ? "" : result?.speech || "";
 
+    const resultStatus = Array.isArray(result) ? null : result?.status || null;
+    const resultContext = Array.isArray(result) ? {} : result?.context || {};
+
     const hydratedSlots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
     const filtered = getFilteredSlotsResponse(
         session,
@@ -1465,25 +1502,37 @@ async function proposeBookingSlots({
         preferredTimeWindow: session.preferredTimeWindow || null,
         preferredHourMinutes: session.preferredHourMinutes || null,
         priorityPreference: session.priorityPreference || null,
+        status: resultStatus,
+        context: resultContext,
     });
 
     if (!session.slots.length) {
-        const msg = filtered.hasTimeFilterMiss
-            ? `Je n'ai pas trouvé de créneau ${describeTimePreference(session.preferredTimeWindow)} dans les prochains jours.`
-            : cleanProposeSpeech(proposeSpeech) ||
-            PHRASES.noAvailability ||
-            "Je n’ai pas de créneau disponible dans les prochains jours.";
+        let msg;
+        let followUpPrompt;
+
+        if (resultStatus === "CABINET_CLOSED_DAY") {
+            msg = proposeSpeech || "Le cabinet est fermé ce jour-là.";
+            followUpPrompt = "Quel autre jour vous conviendrait ?";
+        } else if (resultStatus === "OUTSIDE_OPENING_HOURS") {
+            msg = proposeSpeech || "Le cabinet est fermé à cet horaire.";
+            followUpPrompt = "Donnez-moi un autre horaire ou un autre jour qui vous conviendrait.";
+        } else if (filtered.hasTimeFilterMiss) {
+            msg = `Je n'ai pas trouvé de créneau ${describeTimePreference(session.preferredTimeWindow)} dans les prochains jours.`;
+            followUpPrompt =
+                "Donnez-moi un autre jour ou un autre horaire. Vous pouvez dire par exemple jeudi matin, mercredi en fin d'après-midi ou le 18 mars.";
+        } else {
+            msg =
+                cleanProposeSpeech(proposeSpeech) ||
+                PHRASES.noAvailability ||
+                "Je n’ai pas de créneau disponible dans les prochains jours.";
+            followUpPrompt =
+                "Quel autre jour vous conviendrait ? Vous pouvez dire par exemple jeudi, lundi prochain ou le 18 mars.";
+        }
 
         sayFr(vr, msg);
 
         session.step = "BOOK_ASK_PREFERRED_DATE";
-        promptAndGather(
-            vr,
-            session,
-            filtered.hasTimeFilterMiss
-                ? "Donnez-moi un autre jour ou un autre horaire. Vous pouvez dire par exemple jeudi matin, mercredi en fin d'après-midi ou le 18 mars."
-                : "Quel autre jour vous conviendrait ? Vous pouvez dire par exemple jeudi, lundi prochain ou le 18 mars."
-        );
+        promptAndGather(vr, session, followUpPrompt);
         return sendTwiml(res, vr);
     }
 
@@ -1549,6 +1598,7 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
         phone: session.phone || "",
         appointmentType: session.appointmentType || undefined,
         durationMinutes: session.appointmentDurationMinutes || undefined,
+        cabinet,
     });
 
     logInfo("BOOKING_RESULT", {
@@ -1599,7 +1649,7 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
     const statusMsg =
         result.code === "LOCKED"
             ? "Ce créneau est en cours de réservation."
-            : "Ce créneau vient d’être pris.";
+            : "Le créneau que vous avez demandé n’est plus disponible.";
 
     const searchPractitioners = getSearchPractitioners(session, cabinet);
 
@@ -1627,6 +1677,7 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
     }
 
     sayFr(vr, statusMsg);
+    sayFr(vr, "Je peux vous proposer un autre créneau.");
     saySlots(vr, session, session.slots);
 
     session.step = "BOOK_PICK_ALT";
@@ -2027,6 +2078,20 @@ router.post("/voice", async (req, res) => {
             }
 
             if (detectAlternativeRequest(t)) {
+                if (session.lastProposedStartISO) {
+                    return proposeSlotsFromRequestedDate({
+                        vr,
+                        res,
+                        session,
+                        callSid,
+                        cabinet,
+                        requestedDateISO: session.lastProposedStartISO,
+                        nextStep: "BOOK_PICK_SLOT",
+                        intro: "Je regarde d'autres créneaux le même jour.",
+                        emptyMessage: "Je n’ai pas trouvé d’autre disponibilité ce jour-là.",
+                    });
+                }
+
                 session.step = "BOOK_ASK_PREFERRED_DATE";
                 promptAndGather(
                     vr,
@@ -2222,6 +2287,20 @@ router.post("/voice", async (req, res) => {
             }
 
             if (detectAlternativeRequest(t)) {
+                if (session.lastProposedStartISO) {
+                    return proposeSlotsFromRequestedDate({
+                        vr,
+                        res,
+                        session,
+                        callSid,
+                        cabinet,
+                        requestedDateISO: session.lastProposedStartISO,
+                        nextStep: "BOOK_PICK_ALT",
+                        intro: "Je regarde d'autres créneaux le même jour.",
+                        emptyMessage: "Je n’ai pas trouvé d’autre disponibilité ce jour-là.",
+                    });
+                }
+
                 session.step = "BOOK_ASK_PREFERRED_DATE";
                 promptAndGather(
                     vr,
@@ -2266,6 +2345,7 @@ router.post("/voice", async (req, res) => {
                 phone: session.phone || "",
                 appointmentType: session.appointmentType || undefined,
                 durationMinutes: session.appointmentDurationMinutes || undefined,
+                cabinet,
             });
 
             if (result.ok) {
@@ -2562,6 +2642,20 @@ router.post("/voice", async (req, res) => {
             }
 
             if (detectAlternativeRequest(t)) {
+                if (session.lastProposedStartISO) {
+                    return proposeSlotsFromRequestedDate({
+                        vr,
+                        res,
+                        session,
+                        callSid,
+                        cabinet,
+                        requestedDateISO: session.lastProposedStartISO,
+                        nextStep: "MODIFY_PICK_NEW",
+                        intro: "Je regarde d'autres créneaux le même jour.",
+                        emptyMessage: "Je n’ai pas trouvé d’autre disponibilité ce jour-là.",
+                    });
+                }
+
                 session.step = "MODIFY_ASK_PREFERRED_DATE";
                 promptAndGather(
                     vr,
@@ -2606,6 +2700,7 @@ router.post("/voice", async (req, res) => {
                 phone: session.phone || "",
                 appointmentType: session.appointmentType || undefined,
                 durationMinutes: session.appointmentDurationMinutes || undefined,
+                cabinet,
             });
 
             if (result.ok) {

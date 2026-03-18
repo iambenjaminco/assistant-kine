@@ -1,23 +1,14 @@
 // src/services/calendar.js
 const { google } = require("googleapis");
 const { getAuth } = require("../config/googleAuth");
+const { CABINETS, getDefaultCabinet } = require("../config/cabinets");
 
-const TIMEZONE = "Europe/Paris";
-const SLOT_MINUTES = 30;
-const FIRST_APPOINTMENT_MINUTES = 45;
+const DEFAULT_TIMEZONE = "Europe/Paris";
+const DEFAULT_SLOT_MINUTES = 30;
+const DEFAULT_FIRST_APPOINTMENT_MINUTES = 45;
 const DEFAULT_MIN_LEAD_MINUTES = 60;
 const DEFAULT_LOOKAHEAD_DAYS = 7;
 const DEFAULT_MAX_SUGGESTIONS = 2;
-
-const BUSINESS_HOURS = [
-  {
-    dow: [1, 2, 3, 4, 5],
-    ranges: [
-      { start: "08:00", end: "12:00" },
-      { start: "14:00", end: "19:00" },
-    ],
-  },
-];
 
 const TIME_PREFERENCE_RULES = {
   MORNING: {
@@ -165,8 +156,26 @@ function logError(event, data = {}) {
   console.error(`[CALENDAR][${event}]`, data);
 }
 
+function normalizeText(s) {
+  return (s || "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[’']/g, "'")
+    .replace(/-/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function normalizePhone(s) {
+  return (s || "").toString().replace(/\D/g, "");
+}
+
 function lockKey(calendarId, startDate, endDate) {
-  return `${calendarId}|${new Date(startDate).toISOString()}|${new Date(endDate).toISOString()}`;
+  return `${calendarId}|${new Date(startDate).toISOString()}|${new Date(
+    endDate
+  ).toISOString()}`;
 }
 
 function acquireSlotLock(key, ttlMs = 60_000) {
@@ -187,13 +196,6 @@ function releaseSlotLock(key) {
   slotLocks.delete(key);
 }
 
-function dateAtTime(dayDate, hhmm) {
-  const [h, m] = hhmm.split(":").map(Number);
-  const d = new Date(dayDate);
-  d.setHours(h, m, 0, 0);
-  return d;
-}
-
 function overlaps(aStart, aEnd, bStart, bEnd) {
   return aStart < bEnd && aEnd > bStart;
 }
@@ -207,132 +209,509 @@ function isSlotBusy(slotStart, slotEnd, busyList) {
   return false;
 }
 
-function resolveSlotMinutes({ durationMinutes, appointmentType }) {
-  const n = Number(durationMinutes);
-
-  if (Number.isFinite(n) && n > 0) return n;
-  if (appointmentType === "FIRST") return FIRST_APPOINTMENT_MINUTES;
-
-  return SLOT_MINUTES;
+function getTimeZoneForCabinet(cabinet) {
+  return cabinet?.timezone || DEFAULT_TIMEZONE;
 }
 
-function generateCandidateSlots(startDate, days = DEFAULT_LOOKAHEAD_DAYS, slotMinutes = SLOT_MINUTES) {
-  const slots = [];
-  const day0 = new Date(startDate);
+function getCabinetSlotStep(cabinet) {
+  const n = Number(cabinet?.slotStepMinutes);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_SLOT_MINUTES;
+}
 
-  for (let i = 0; i < days; i++) {
-    const day = new Date(day0);
-    day.setDate(day0.getDate() + i);
+function getCabinetMinLeadMinutes(cabinet) {
+  const n = Number(cabinet?.minLeadMinutes);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MIN_LEAD_MINUTES;
+}
 
-    const jsDow = day.getDay();
-    const isoDow = jsDow === 0 ? 7 : jsDow;
+function getCabinetLookaheadDays(cabinet) {
+  const n = Number(cabinet?.lookaheadDays);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_LOOKAHEAD_DAYS;
+}
 
-    const rule = BUSINESS_HOURS.find((r) => r.dow.includes(isoDow));
-    if (!rule) continue;
+function getCabinetMaxSuggestions(cabinet) {
+  const n = Number(cabinet?.maxSuggestions);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_SUGGESTIONS;
+}
 
-    for (const range of rule.ranges) {
-      let cursor = dateAtTime(day, range.start);
-      const end = dateAtTime(day, range.end);
+function resolveSlotMinutes({
+  durationMinutes,
+  appointmentType,
+  cabinet,
+}) {
+  const n = Number(durationMinutes);
+  if (Number.isFinite(n) && n > 0) return n;
 
-      while (cursor < end) {
-        const slotStart = new Date(cursor);
-        const slotEnd = new Date(cursor);
-        slotEnd.setMinutes(slotEnd.getMinutes() + slotMinutes);
-
-        if (slotEnd <= end) {
-          slots.push({ start: slotStart, end: slotEnd });
-        }
-
-        cursor.setMinutes(cursor.getMinutes() + SLOT_MINUTES);
-      }
-    }
+  if (appointmentType === "FIRST") {
+    const first = Number(cabinet?.appointmentDurations?.first);
+    return Number.isFinite(first) && first > 0
+      ? first
+      : DEFAULT_FIRST_APPOINTMENT_MINUTES;
   }
 
-  return slots;
+  const followUp = Number(cabinet?.appointmentDurations?.followUp);
+  return Number.isFinite(followUp) && followUp > 0
+    ? followUp
+    : DEFAULT_SLOT_MINUTES;
 }
 
-function formatSlotFR(dateOrIso) {
+function getCabinetForPractitioners(practitioners = []) {
+  const first = practitioners[0];
+  const cabinetKey = first?.cabinetKey;
+
+  if (cabinetKey && CABINETS[cabinetKey]) {
+    return CABINETS[cabinetKey];
+  }
+
+  return getDefaultCabinet();
+}
+
+function getCalendarClientCachedMeta(practitioners = [], cabinet = null) {
+  const effectiveCabinet = cabinet || getCabinetForPractitioners(practitioners);
+  const timezone = getTimeZoneForCabinet(effectiveCabinet);
+  return { cabinet: effectiveCabinet, timezone };
+}
+
+function getDatePartsInTimezone(dateOrIso, timezone) {
   const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
-  if (Number.isNaN(d.getTime())) return "une date invalide";
 
-  const datePart = d.toLocaleDateString("fr-FR", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    timeZone: TIMEZONE,
-  });
+  const parts = new Intl.DateTimeFormat("fr-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
 
-  const timePart = d.toLocaleTimeString("fr-FR", {
+  return {
+    year: Number(parts.find((p) => p.type === "year")?.value || NaN),
+    month: Number(parts.find((p) => p.type === "month")?.value || NaN),
+    day: Number(parts.find((p) => p.type === "day")?.value || NaN),
+  };
+}
+
+function getDateKeyInTimezone(dateOrIso, timezone) {
+  const { year, month, day } = getDatePartsInTimezone(dateOrIso, timezone);
+  const yyyy = String(year).padStart(4, "0");
+  const mm = String(month).padStart(2, "0");
+  const dd = String(day).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function getIsoDowInTimezone(dateOrIso, timezone) {
+  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "short",
+  }).format(d);
+
+  const map = {
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+    Sun: 7,
+  };
+
+  return map[weekday] || null;
+}
+
+function getMinutesInTimezone(dateOrIso, timezone) {
+  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+
+  const formatter = new Intl.DateTimeFormat("fr-FR", {
     hour: "2-digit",
     minute: "2-digit",
-    timeZone: TIMEZONE,
+    hour12: false,
+    timeZone: timezone,
   });
 
-  return `${datePart} à ${timePart}`;
+  const parts = formatter.formatToParts(d);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value || NaN);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value || NaN);
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return hour * 60 + minute;
 }
 
-async function getCalendarClient() {
-  const auth = await getAuth();
-  return google.calendar({ version: "v3", auth });
+function parseHHMMToMinutes(hhmm) {
+  if (!hhmm || typeof hhmm !== "string") return null;
+  const [h, m] = hhmm.split(":").map(Number);
+
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+
+  return h * 60 + m;
 }
 
-async function getBusyPeriods(calendar, calendarId, timeMin, timeMax) {
-  const res = await calendar.freebusy.query({
-    requestBody: {
-      timeMin: timeMin.toISOString(),
-      timeMax: timeMax.toISOString(),
-      timeZone: TIMEZONE,
-      items: [{ id: calendarId }],
-    },
-  });
+function formatMinutesSpeech(totalMinutes) {
+  if (!Number.isFinite(totalMinutes)) return "";
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
 
-  const cal = res.data.calendars?.[calendarId];
-  return cal?.busy ?? [];
+  if (m === 0) return `${h}h`;
+  return `${h}h${String(m).padStart(2, "0")}`;
 }
 
-function normalizeText(s) {
-  return (s || "")
-    .toString()
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[’']/g, "'")
-    .replace(/-/g, " ")
-    .replace(/\s+/g, " ");
+function formatRangesSpeech(ranges = []) {
+  const normalized = ranges
+    .map((r) => ({
+      startMinutes: parseHHMMToMinutes(r.start),
+      endMinutes: parseHHMMToMinutes(r.end),
+    }))
+    .filter(
+      (r) =>
+        Number.isFinite(r.startMinutes) &&
+        Number.isFinite(r.endMinutes) &&
+        r.endMinutes > r.startMinutes
+    )
+    .map(
+      (r) =>
+        `de ${formatMinutesSpeech(r.startMinutes)} à ${formatMinutesSpeech(
+          r.endMinutes
+        )}`
+    );
+
+  if (!normalized.length) return "";
+  if (normalized.length === 1) return normalized[0];
+  if (normalized.length === 2) return `${normalized[0]} et ${normalized[1]}`;
+
+  return `${normalized.slice(0, -1).join(", ")} et ${
+    normalized[normalized.length - 1]
+  }`;
 }
 
-function normalizePhone(s) {
-  return (s || "").toString().replace(/\D/g, "");
+function buildClosedSpeech({ status, reason, ranges }) {
+  const rangesSpeech = formatRangesSpeech(ranges);
+
+  if (status === "CABINET_CLOSED_DAY") {
+    return reason
+      ? `Le cabinet est fermé ce jour-là pour ${reason.toLowerCase()}.`
+      : "Le cabinet est fermé ce jour-là.";
+  }
+
+  if (status === "OUTSIDE_OPENING_HOURS") {
+    if (rangesSpeech) {
+      return `Le cabinet est fermé à cet horaire. Il est ouvert ${rangesSpeech}.`;
+    }
+    return "Le cabinet est fermé à cet horaire.";
+  }
+
+  return "Le cabinet est fermé.";
 }
 
-function extractPatientNameFromEvent(ev) {
-  const description = ev?.description || "";
-  const lines = description.split("\n").map((line) => line.trim());
+function dateAtLocalMinutes(dayDate, totalMinutes) {
+  const d = new Date(dayDate);
+  d.setHours(0, 0, 0, 0);
+  d.setMinutes(totalMinutes, 0, 0);
+  return d;
+}
 
-  const patientLine = lines.find((line) =>
-    normalizeText(line).startsWith("patient :")
+function dateAtTime(dayDate, hhmm) {
+  const totalMinutes = parseHHMMToMinutes(hhmm);
+  return dateAtLocalMinutes(dayDate, totalMinutes);
+}
+
+function getEasterDateUTC(year) {
+  const f = Math.floor;
+  const a = year % 19;
+  const b = f(year / 100);
+  const c = year % 100;
+  const d = f(b / 4);
+  const e = b % 4;
+  const g = f((8 * b + 13) / 25);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const j = f(c / 4);
+  const k = c % 4;
+  const m = (a + 11 * h) / 319;
+  const r = (2 * e + 2 * j - k - h + f(m) + 32) % 7;
+  const n = f((h - f(m) + r + 90) / 25);
+  const p = (h - f(m) + r + n + 19) % 32;
+
+  return new Date(Date.UTC(year, n - 1, p));
+}
+
+function addDaysUTC(date, days) {
+  const d = new Date(date.getTime());
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+
+function formatUTCDateKey(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getFrenchPublicHolidayKeys(year) {
+  const easter = getEasterDateUTC(year);
+  const easterMonday = addDaysUTC(easter, 1);
+  const ascension = addDaysUTC(easter, 39);
+  const pentecostMonday = addDaysUTC(easter, 50);
+
+  return new Set([
+    `${year}-01-01`,
+    formatUTCDateKey(easterMonday),
+    `${year}-05-01`,
+    `${year}-05-08`,
+    formatUTCDateKey(ascension),
+    formatUTCDateKey(pentecostMonday),
+    `${year}-07-14`,
+    `${year}-08-15`,
+    `${year}-11-01`,
+    `${year}-11-11`,
+    `${year}-12-25`,
+  ]);
+}
+
+function isFrenchPublicHoliday(dateOrIso, timezone) {
+  const dateKey = getDateKeyInTimezone(dateOrIso, timezone);
+  const year = Number(dateKey.slice(0, 4));
+  return getFrenchPublicHolidayKeys(year).has(dateKey);
+}
+
+function isDateWithinClosedPeriod(dateKey, period) {
+  if (!period?.start || !period?.end) return false;
+
+  const startKey = String(period.start).slice(0, 10);
+  const endKey = String(period.end).slice(0, 10);
+
+  return dateKey >= startKey && dateKey <= endKey;
+}
+
+function getOpeningOverrideForDate(dateKey, cabinet) {
+  return (cabinet?.openingOverrides || []).find((item) => item?.date === dateKey) || null;
+}
+
+function getClosedDateForDate(dateKey, cabinet) {
+  return (cabinet?.closedDates || []).find((item) => item?.date === dateKey) || null;
+}
+
+function getClosedPeriodForDate(dateKey, cabinet) {
+  return (cabinet?.closedPeriods || []).find((item) =>
+    isDateWithinClosedPeriod(dateKey, item)
+  ) || null;
+}
+
+function getBaseOpeningRangesForDate(dateOrIso, cabinet, timezone) {
+  const isoDow = getIsoDowInTimezone(dateOrIso, timezone);
+  if (!isoDow) return [];
+
+  const rule = (cabinet?.openingHours || []).find((r) =>
+    Array.isArray(r?.dow) && r.dow.includes(isoDow)
   );
 
-  if (!patientLine) return null;
-
-  const patientName = patientLine.split(":").slice(1).join(":").trim();
-  return patientName || null;
+  return Array.isArray(rule?.ranges) ? rule.ranges : [];
 }
 
-function extractPhoneFromEvent(ev) {
-  const description = ev?.description || "";
-  const lines = description.split("\n").map((line) => line.trim());
+function getCabinetDayAvailability(dateOrIso, cabinet) {
+  const timezone = getTimeZoneForCabinet(cabinet);
+  const dateKey = getDateKeyInTimezone(dateOrIso, timezone);
 
-  const phoneLine = lines.find((line) => {
-    const normalized = normalizeText(line);
-    return normalized.startsWith("telephone :") || normalized.startsWith("téléphone :");
+  const openingOverride = getOpeningOverrideForDate(dateKey, cabinet);
+  if (openingOverride) {
+    const ranges = Array.isArray(openingOverride.ranges)
+      ? openingOverride.ranges
+      : [];
+    return {
+      isClosed: ranges.length === 0,
+      status: ranges.length ? "OPENING_OVERRIDE" : "CABINET_CLOSED_DAY",
+      reason: openingOverride.reason || null,
+      ranges,
+      dateKey,
+      timezone,
+    };
+  }
+
+  const closedDate = getClosedDateForDate(dateKey, cabinet);
+  if (closedDate) {
+    return {
+      isClosed: true,
+      status: "CABINET_CLOSED_DAY",
+      reason: closedDate.reason || "fermeture exceptionnelle",
+      ranges: [],
+      dateKey,
+      timezone,
+    };
+  }
+
+  const closedPeriod = getClosedPeriodForDate(dateKey, cabinet);
+  if (closedPeriod) {
+    return {
+      isClosed: true,
+      status: "CABINET_CLOSED_DAY",
+      reason: closedPeriod.reason || "fermeture exceptionnelle",
+      ranges: [],
+      dateKey,
+      timezone,
+    };
+  }
+
+  if (
+    cabinet?.observesPublicHolidays &&
+    cabinet?.publicHolidayCountry === "FR" &&
+    isFrenchPublicHoliday(dateOrIso, timezone)
+  ) {
+    return {
+      isClosed: true,
+      status: "CABINET_CLOSED_DAY",
+      reason: "jour férié",
+      ranges: [],
+      dateKey,
+      timezone,
+    };
+  }
+
+  const ranges = getBaseOpeningRangesForDate(dateOrIso, cabinet, timezone);
+
+  if (!ranges.length) {
+    return {
+      isClosed: true,
+      status: "CABINET_CLOSED_DAY",
+      reason: "fermeture habituelle",
+      ranges: [],
+      dateKey,
+      timezone,
+    };
+  }
+
+  return {
+    isClosed: false,
+    status: "OPEN",
+    reason: null,
+    ranges,
+    dateKey,
+    timezone,
+  };
+}
+
+function isWithinRangesByMinutes(targetStartMinutes, targetEndMinutes, ranges = []) {
+  return ranges.some((range) => {
+    const startMinutes = parseHHMMToMinutes(range.start);
+    const endMinutes = parseHHMMToMinutes(range.end);
+
+    if (
+      !Number.isFinite(startMinutes) ||
+      !Number.isFinite(endMinutes) ||
+      endMinutes <= startMinutes
+    ) {
+      return false;
+    }
+
+    return (
+      targetStartMinutes >= startMinutes &&
+      targetEndMinutes <= endMinutes
+    );
+  });
+}
+
+function matchesTimePreference(slotStart, timePreference, timezone) {
+  const rule = getTimePreferenceRule(timePreference);
+  if (!rule) return true;
+
+  const slotMinutes = getMinutesInTimezone(slotStart, timezone);
+  if (!Number.isFinite(slotMinutes)) return true;
+
+  return slotMinutes >= rule.startMinutes && slotMinutes < rule.endMinutes;
+}
+
+function practitionerSortKey(practitioner) {
+  return normalizeText(practitioner?.name || "");
+}
+
+function buildOrderedPractitioners(practitioners) {
+  return [...practitioners].sort((a, b) => {
+    const aKey = practitionerSortKey(a);
+    const bKey = practitionerSortKey(b);
+    return aKey.localeCompare(bKey, "fr");
+  });
+}
+
+function scoreSlotForTargetHour(slot, targetHourMinutes, timezone) {
+  if (!Number.isFinite(targetHourMinutes)) return 0;
+  const slotMinutes = getMinutesInTimezone(slot.start, timezone);
+  if (!Number.isFinite(slotMinutes)) return 9999;
+  return Math.abs(slotMinutes - targetHourMinutes);
+}
+
+function sortSlotsByTargetHour(slots, targetHourMinutes, timezone) {
+  return [...(slots || [])].sort((a, b) => {
+    const diffA = scoreSlotForTargetHour(a, targetHourMinutes, timezone);
+    const diffB = scoreSlotForTargetHour(b, targetHourMinutes, timezone);
+
+    if (diffA !== diffB) return diffA - diffB;
+
+    const aTime = new Date(a.start).getTime();
+    const bTime = new Date(b.start).getTime();
+    return aTime - bTime;
+  });
+}
+
+function groupSlotsByDay(slots, timezone) {
+  const groups = new Map();
+
+  for (const slot of slots || []) {
+    const key = getDateKeyInTimezone(slot.start, timezone);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(slot);
+  }
+
+  return groups;
+}
+
+function pickBestDayForTargetHour(groups, targetHourMinutes, timezone) {
+  const entries = [...groups.entries()].map(([dayKey, slots]) => {
+    const sorted = sortSlotsByTargetHour(slots, targetHourMinutes, timezone);
+    const bestDiff = sorted.length
+      ? scoreSlotForTargetHour(sorted[0], targetHourMinutes, timezone)
+      : 9999;
+    const firstStart = sorted.length
+      ? new Date(sorted[0].start).getTime()
+      : Number.MAX_SAFE_INTEGER;
+
+    return {
+      dayKey,
+      slots: sorted,
+      bestDiff,
+      firstStart,
+    };
   });
 
-  if (!phoneLine) return "";
+  entries.sort((a, b) => {
+    if (a.bestDiff !== b.bestDiff) return a.bestDiff - b.bestDiff;
+    return a.firstStart - b.firstStart;
+  });
 
-  const phone = phoneLine.split(":").slice(1).join(":").trim();
-  return normalizePhone(phone);
+  return entries[0] || null;
+}
+
+function narrowSlotsAroundTargetHour(slots, targetHourMinutes, maxSuggestions, timezone) {
+  if (!Number.isFinite(targetHourMinutes)) {
+    return (slots || []).slice(0, maxSuggestions);
+  }
+
+  const sorted = sortSlotsByTargetHour(slots, targetHourMinutes, timezone);
+  const strictWindow = sorted.filter(
+    (slot) => scoreSlotForTargetHour(slot, targetHourMinutes, timezone) <= 60
+  );
+
+  const acceptableWindow = strictWindow.length
+    ? strictWindow
+    : sorted.filter(
+        (slot) => scoreSlotForTargetHour(slot, targetHourMinutes, timezone) <= 90
+      );
+
+  if (!acceptableWindow.length) {
+    return [];
+  }
+
+  const grouped = groupSlotsByDay(acceptableWindow, timezone);
+  const bestDay = pickBestDayForTargetHour(grouped, targetHourMinutes, timezone);
+
+  if (!bestDay) {
+    return acceptableWindow.slice(0, maxSuggestions);
+  }
+
+  return bestDay.slots.slice(0, maxSuggestions);
 }
 
 function getTimePreferenceRule(timePreference) {
@@ -358,53 +737,271 @@ function getPriorityPreferenceRule(priorityPreference) {
   return PRIORITY_PREFERENCE_RULES[priorityPreference] || null;
 }
 
-function getHourInParis(dateOrIso) {
-  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
-  const formatter = new Intl.DateTimeFormat("fr-FR", {
-    hour: "2-digit",
-    hour12: false,
-    timeZone: TIMEZONE,
-  });
-
-  const parts = formatter.formatToParts(d);
-  const hour = Number(parts.find((p) => p.type === "hour")?.value || NaN);
-  return Number.isFinite(hour) ? hour : null;
+function shouldPriorityOverrideTargetHour(priorityPreference) {
+  const rule = getPriorityPreferenceRule(priorityPreference);
+  if (!rule) return false;
+  return rule.key === "EARLIEST" || rule.key === "LATEST" || rule.key === "FLEXIBLE";
 }
 
-function getMinutesInParis(dateOrIso) {
-  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
-  const formatter = new Intl.DateTimeFormat("fr-FR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: TIMEZONE,
-  });
+function sortAvailableSlotsByPriority(slots, priorityPreference) {
+  const available = [...(slots || [])];
+  const rule = getPriorityPreferenceRule(priorityPreference);
 
-  const parts = formatter.formatToParts(d);
-  const hour = Number(parts.find((p) => p.type === "hour")?.value || NaN);
-  const minute = Number(parts.find((p) => p.type === "minute")?.value || NaN);
+  if (!rule || rule.key === "FLEXIBLE" || rule.key === "EARLIEST") {
+    return available.sort(
+      (a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()
+    );
+  }
 
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
-  return hour * 60 + minute;
+  if (rule.key === "LATEST") {
+    return available.sort(
+      (a, b) => new Date(b.start).getTime() - new Date(a.start).getTime()
+    );
+  }
+
+  return available.sort(
+    (a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()
+  );
 }
 
-function getDateKeyInParis(dateOrIso) {
-  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
-  return new Intl.DateTimeFormat("fr-CA", {
-    timeZone: TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(d);
+function slotUniqueKey(slot) {
+  return `${slot.calendarId}|${new Date(slot.start).toISOString()}|${new Date(
+    slot.end
+  ).toISOString()}`;
+}
+
+function dedupeSlots(slots = []) {
+  const seen = new Set();
+  const out = [];
+
+  for (const slot of slots) {
+    const key = slotUniqueKey(slot);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(slot);
+  }
+
+  return out;
+}
+
+function buildSlotSpeech(
+  slots,
+  { emptySpeech, timePreference, targetHourMinutes, priorityPreference, timezone } = {}
+) {
+  const available = slots || [];
+
+  if (!available.length) {
+    if (
+      Number.isFinite(targetHourMinutes) &&
+      !shouldPriorityOverrideTargetHour(priorityPreference)
+    ) {
+      const hh = String(Math.floor(targetHourMinutes / 60)).padStart(2, "0");
+      const mm = String(targetHourMinutes % 60).padStart(2, "0");
+      return `Je n’ai pas trouvé de disponibilité vers ${hh}h${mm}.`;
+    }
+
+    if (timePreference && getTimePreferenceRule(timePreference)) {
+      return `Je n’ai pas trouvé de disponibilité ${getTimePreferenceRule(
+        timePreference
+      ).label}.`;
+    }
+
+    if (priorityPreference && getPriorityPreferenceRule(priorityPreference)) {
+      return `Je n’ai pas trouvé de disponibilité pour ${getPriorityPreferenceRule(
+        priorityPreference
+      ).label}.`;
+    }
+
+    return emptySpeech || "Je n’ai pas trouvé de disponibilité.";
+  }
+
+  const a = available[0];
+  const b = available[1] || available[0];
+
+  if (b && b.start && a.start && b.start !== a.start) {
+    return `Je peux vous proposer ${formatSlotFR(a.start, timezone)}${
+      a.practitionerName ? ` avec ${a.practitionerName}` : ""
+    } ou ${formatSlotFR(b.start, timezone)}${
+      b.practitionerName ? ` avec ${b.practitionerName}` : ""
+    }.`;
+  }
+
+  return `Je peux vous proposer ${formatSlotFR(a.start, timezone)}${
+    a.practitionerName ? ` avec ${a.practitionerName}` : ""
+  }.`;
+}
+
+function selectAvailableSlots({
+  candidates,
+  practitioners,
+  busyByCal,
+  cutoff,
+  maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
+  timePreference = null,
+  targetHourMinutes = null,
+  priorityPreference = null,
+  timezone = DEFAULT_TIMEZONE,
+}) {
+  const orderedPractitioners = buildOrderedPractitioners(practitioners);
+  const available = [];
+  const seenKeys = new Set();
+
+  for (const c of candidates) {
+    if (c.start < cutoff) continue;
+    if (!matchesTimePreference(c.start, timePreference, timezone)) continue;
+
+    for (const p of orderedPractitioners) {
+      const busy = busyByCal[p.calendarId] || [];
+      if (isSlotBusy(c.start, c.end, busy)) continue;
+
+      const key = `${p.calendarId}|${c.start.toISOString()}|${c.end.toISOString()}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+
+      available.push({
+        start: c.start,
+        end: c.end,
+        calendarId: p.calendarId,
+        practitionerName: p.name,
+      });
+      break;
+    }
+  }
+
+  if (!available.length) return [];
+
+  const effectiveTargetHourMinutes = shouldPriorityOverrideTargetHour(priorityPreference)
+    ? null
+    : targetHourMinutes;
+
+  if (Number.isFinite(effectiveTargetHourMinutes)) {
+    return narrowSlotsAroundTargetHour(
+      available,
+      effectiveTargetHourMinutes,
+      maxSuggestions,
+      timezone
+    );
+  }
+
+  const prioritized = sortAvailableSlotsByPriority(available, priorityPreference);
+
+  if (priorityPreference === "LATEST") {
+    return prioritized
+      .slice(0, maxSuggestions)
+      .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+  }
+
+  return prioritized.slice(0, maxSuggestions);
+}
+
+function generateCandidateSlots({
+  startDate,
+  days,
+  slotMinutes,
+  cabinet,
+}) {
+  const slots = [];
+  const day0 = new Date(startDate);
+  const timezone = getTimeZoneForCabinet(cabinet);
+  const stepMinutes = getCabinetSlotStep(cabinet);
+
+  for (let i = 0; i < days; i++) {
+    const day = new Date(day0);
+    day.setDate(day0.getDate() + i);
+
+    const availability = getCabinetDayAvailability(day, cabinet);
+    if (availability.isClosed || !availability.ranges.length) continue;
+
+    for (const range of availability.ranges) {
+      let cursor = dateAtTime(day, range.start);
+      const end = dateAtTime(day, range.end);
+
+      while (cursor < end) {
+        const slotStart = new Date(cursor);
+        const slotEnd = new Date(cursor);
+        slotEnd.setMinutes(slotEnd.getMinutes() + slotMinutes);
+
+        const startMinutes = getMinutesInTimezone(slotStart, timezone);
+        const endMinutes = startMinutes + slotMinutes;
+
+        if (
+          slotEnd <= end &&
+          isWithinRangesByMinutes(startMinutes, endMinutes, availability.ranges)
+        ) {
+          slots.push({ start: slotStart, end: slotEnd });
+        }
+
+        cursor.setMinutes(cursor.getMinutes() + stepMinutes);
+      }
+    }
+  }
+
+  return slots;
+}
+
+function extractPatientNameFromEvent(ev) {
+  const description = ev?.description || "";
+  const lines = description.split("\n").map((line) => line.trim());
+
+  const patientLine = lines.find((line) =>
+    normalizeText(line).startsWith("patient :")
+  );
+
+  if (!patientLine) return null;
+
+  const patientName = patientLine.split(":").slice(1).join(":").trim();
+  return patientName || null;
+}
+
+function extractPhoneFromEvent(ev) {
+  const description = ev?.description || "";
+  const lines = description.split("\n").map((line) => line.trim());
+
+  const phoneLine = lines.find((line) => {
+    const normalized = normalizeText(line);
+    return (
+      normalized.startsWith("telephone :") ||
+      normalized.startsWith("téléphone :")
+    );
+  });
+
+  if (!phoneLine) return "";
+
+  const phone = phoneLine.split(":").slice(1).join(":").trim();
+  return normalizePhone(phone);
 }
 
 function parseTargetHourMinutes(text = "") {
   const t = normalizeText(text);
 
-  const explicitTimeMatch = t.match(/\b(?:vers|a|à)?\s*(\d{1,2})\s*h\s*(\d{2})?\b/);
+  if (t.includes("midi et demi")) return 12 * 60 + 30;
+  if (t.includes("midi")) return 12 * 60;
+  if (t.includes("minuit")) return 0;
+
+  if (t.includes("et quart")) {
+    const quarterMatch = t.match(/\b(\d{1,2})\s*h\b/);
+    if (quarterMatch) {
+      const hour = Number(quarterMatch[1]);
+      if (Number.isFinite(hour)) return hour * 60 + 15;
+    }
+  }
+
+  if (t.includes("moins le quart")) {
+    const quarterLessMatch = t.match(/\b(\d{1,2})\s*h\b/);
+    if (quarterLessMatch) {
+      const hour = Number(quarterLessMatch[1]);
+      if (Number.isFinite(hour)) return hour * 60 - 15;
+    }
+  }
+
+  const explicitTimeMatch = t.match(
+    /\b(?:vers|a|à|aux alentours de|autour de)?\s*(\d{1,2})\s*h\s*(\d{2})?\b/
+  );
   if (explicitTimeMatch) {
     const hour = parseInt(explicitTimeMatch[1], 10);
-    const minute = explicitTimeMatch[2] ? parseInt(explicitTimeMatch[2], 10) : 0;
+    const minute = explicitTimeMatch[2]
+      ? parseInt(explicitTimeMatch[2], 10)
+      : 0;
 
     if (
       Number.isFinite(hour) &&
@@ -460,259 +1057,89 @@ function detectPriorityPreference(text = "") {
   return null;
 }
 
-function matchesTimePreference(slotStart, timePreference) {
-  const rule = getTimePreferenceRule(timePreference);
-  if (!rule) return true;
-
-  const slotMinutes = getMinutesInParis(slotStart);
-  if (!Number.isFinite(slotMinutes)) return true;
-
-  return slotMinutes >= rule.startMinutes && slotMinutes < rule.endMinutes;
+async function getCalendarClient() {
+  const auth = await getAuth();
+  return google.calendar({ version: "v3", auth });
 }
 
-function practitionerSortKey(practitioner) {
-  return normalizeText(practitioner?.name || "");
-}
-
-function buildOrderedPractitioners(practitioners) {
-  return [...practitioners].sort((a, b) => {
-    const aKey = practitionerSortKey(a);
-    const bKey = practitionerSortKey(b);
-    return aKey.localeCompare(bKey, "fr");
-  });
-}
-
-function scoreSlotForTargetHour(slot, targetHourMinutes) {
-  if (!Number.isFinite(targetHourMinutes)) return 0;
-  const slotMinutes = getMinutesInParis(slot.start);
-  if (!Number.isFinite(slotMinutes)) return 9999;
-  return Math.abs(slotMinutes - targetHourMinutes);
-}
-
-function sortSlotsByTargetHour(slots, targetHourMinutes) {
-  return [...(slots || [])].sort((a, b) => {
-    const diffA = scoreSlotForTargetHour(a, targetHourMinutes);
-    const diffB = scoreSlotForTargetHour(b, targetHourMinutes);
-
-    if (diffA !== diffB) return diffA - diffB;
-
-    const aTime = new Date(a.start).getTime();
-    const bTime = new Date(b.start).getTime();
-    return aTime - bTime;
-  });
-}
-
-function groupSlotsByParisDay(slots) {
-  const groups = new Map();
-
-  for (const slot of slots || []) {
-    const key = getDateKeyInParis(slot.start);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(slot);
-  }
-
-  return groups;
-}
-
-function sortDaySlotsByTargetHour(slots, targetHourMinutes) {
-  return [...(slots || [])].sort((a, b) => {
-    const diffA = scoreSlotForTargetHour(a, targetHourMinutes);
-    const diffB = scoreSlotForTargetHour(b, targetHourMinutes);
-
-    if (diffA !== diffB) return diffA - diffB;
-
-    const aMinutes = getMinutesInParis(a.start);
-    const bMinutes = getMinutesInParis(b.start);
-
-    if (Number.isFinite(aMinutes) && Number.isFinite(bMinutes) && aMinutes !== bMinutes) {
-      return aMinutes - bMinutes;
-    }
-
-    return new Date(a.start).getTime() - new Date(b.start).getTime();
-  });
-}
-
-function pickBestDayForTargetHour(groups, targetHourMinutes) {
-  const entries = [...groups.entries()].map(([dayKey, slots]) => {
-    const sorted = sortDaySlotsByTargetHour(slots, targetHourMinutes);
-    const bestDiff = sorted.length ? scoreSlotForTargetHour(sorted[0], targetHourMinutes) : 9999;
-    const within60 = sorted.filter((slot) => scoreSlotForTargetHour(slot, targetHourMinutes) <= 60).length;
-    const within90 = sorted.filter((slot) => scoreSlotForTargetHour(slot, targetHourMinutes) <= 90).length;
-    const firstStart = sorted.length ? new Date(sorted[0].start).getTime() : Number.MAX_SAFE_INTEGER;
-
-    return {
-      dayKey,
-      slots: sorted,
-      bestDiff,
-      within60,
-      within90,
-      firstStart,
-    };
+async function getBusyPeriods(calendar, calendarId, timeMin, timeMax, timezone) {
+  const res = await calendar.freebusy.query({
+    requestBody: {
+      timeMin: timeMin.toISOString(),
+      timeMax: timeMax.toISOString(),
+      timeZone: timezone,
+      items: [{ id: calendarId }],
+    },
   });
 
-  entries.sort((a, b) => {
-    if (a.bestDiff !== b.bestDiff) return a.bestDiff - b.bestDiff;
-    if (a.within60 !== b.within60) return b.within60 - a.within60;
-    if (a.within90 !== b.within90) return b.within90 - a.within90;
-    return a.firstStart - b.firstStart;
-  });
-
-  return entries[0] || null;
+  const cal = res.data.calendars?.[calendarId];
+  return cal?.busy ?? [];
 }
 
-function narrowSlotsAroundTargetHour(slots, targetHourMinutes, maxSuggestions) {
-  if (!Number.isFinite(targetHourMinutes)) {
-    return (slots || []).slice(0, maxSuggestions);
-  }
-
-  const sorted = sortSlotsByTargetHour(slots, targetHourMinutes);
-  const strictWindow = sorted.filter((slot) => scoreSlotForTargetHour(slot, targetHourMinutes) <= 60);
-  const acceptableWindow = strictWindow.length ? strictWindow : sorted.filter((slot) => scoreSlotForTargetHour(slot, targetHourMinutes) <= 90);
-
-  if (!acceptableWindow.length) {
-    return [];
-  }
-
-  const grouped = groupSlotsByParisDay(acceptableWindow);
-  const bestDay = pickBestDayForTargetHour(grouped, targetHourMinutes);
-
-  if (!bestDay) {
-    return acceptableWindow.slice(0, maxSuggestions);
-  }
-
-  const preferredSameDay = bestDay.slots.slice(0, maxSuggestions);
-  if (preferredSameDay.length >= maxSuggestions) {
-    return preferredSameDay;
-  }
-
-  const usedKeys = new Set(
-    preferredSameDay.map((slot) => `${slot.calendarId}|${new Date(slot.start).toISOString()}|${new Date(slot.end).toISOString()}`)
-  );
-
-  const remaining = acceptableWindow.filter((slot) => {
-    const key = `${slot.calendarId}|${new Date(slot.start).toISOString()}|${new Date(slot.end).toISOString()}`;
-    return !usedKeys.has(key);
-  });
-
-  return [...preferredSameDay, ...remaining.slice(0, Math.max(0, maxSuggestions - preferredSameDay.length))];
-}
-
-function shouldPriorityOverrideTargetHour(priorityPreference) {
-  const rule = getPriorityPreferenceRule(priorityPreference);
-  if (!rule) return false;
-  return rule.key === "EARLIEST" || rule.key === "LATEST" || rule.key === "FLEXIBLE";
-}
-
-function sortAvailableSlotsByPriority(slots, priorityPreference) {
-  const available = [...(slots || [])];
-  const rule = getPriorityPreferenceRule(priorityPreference);
-
-  if (!rule || rule.key === "FLEXIBLE" || rule.key === "EARLIEST") {
-    return available.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
-  }
-
-  if (rule.key === "LATEST") {
-    return available.sort((a, b) => new Date(b.start).getTime() - new Date(a.start).getTime());
-  }
-
-  return available.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
-}
-
-function buildSlotSpeech(
-  slots,
-  { emptySpeech, timePreference, targetHourMinutes, priorityPreference } = {}
-) {
-  const available = slots || [];
-
-  if (!available.length) {
-    if (Number.isFinite(targetHourMinutes) && !shouldPriorityOverrideTargetHour(priorityPreference)) {
-      const hh = String(Math.floor(targetHourMinutes / 60)).padStart(2, "0");
-      const mm = String(targetHourMinutes % 60).padStart(2, "0");
-      return `Je n’ai pas trouvé de disponibilité vers ${hh}h${mm}.`;
-    }
-
-    if (timePreference && getTimePreferenceRule(timePreference)) {
-      return `Je n’ai pas trouvé de disponibilité ${getTimePreferenceRule(timePreference).label}.`;
-    }
-
-    if (priorityPreference && getPriorityPreferenceRule(priorityPreference)) {
-      return `Je n’ai pas trouvé de disponibilité pour ${getPriorityPreferenceRule(priorityPreference).label}.`;
-    }
-
-    return emptySpeech || "Je n’ai pas trouvé de disponibilité.";
-  }
-
-  const a = available[0];
-  const b = available[1] || available[0];
-
-  if (b && b.start && a.start && b.start !== a.start) {
-    return `Je peux vous proposer ${formatSlotFR(a.start)}${
-      a.practitionerName ? ` avec ${a.practitionerName}` : ""
-    } ou ${formatSlotFR(b.start)}${
-      b.practitionerName ? ` avec ${b.practitionerName}` : ""
-    }.`;
-  }
-
-  return `Je peux vous proposer ${formatSlotFR(a.start)}${
-    a.practitionerName ? ` avec ${a.practitionerName}` : ""
-  }.`;
-}
-
-function selectAvailableSlots({
-  candidates,
+function buildExactRequestedSlots({
+  requestedDate,
   practitioners,
   busyByCal,
-  cutoff,
-  maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
-  timePreference = null,
-  targetHourMinutes = null,
-  priorityPreference = null,
 }) {
-  const orderedPractitioners = buildOrderedPractitioners(practitioners);
   const available = [];
-  const seenKeys = new Set();
 
-  for (const c of candidates) {
-    if (c.start < cutoff) continue;
-    if (!matchesTimePreference(c.start, timePreference)) continue;
+  for (const practitioner of buildOrderedPractitioners(practitioners)) {
+    const busy = busyByCal[practitioner.calendarId] || [];
+    if (isSlotBusy(requestedDate.start, requestedDate.end, busy)) continue;
 
-    for (const p of orderedPractitioners) {
-      const busy = busyByCal[p.calendarId] || [];
-      if (isSlotBusy(c.start, c.end, busy)) continue;
-
-      const key = `${p.calendarId}|${c.start.toISOString()}|${c.end.toISOString()}`;
-      if (seenKeys.has(key)) continue;
-      seenKeys.add(key);
-
-      available.push({
-        start: c.start,
-        end: c.end,
-        calendarId: p.calendarId,
-        practitionerName: p.name,
-      });
-      break;
-    }
+    available.push({
+      start: requestedDate.start,
+      end: requestedDate.end,
+      calendarId: practitioner.calendarId,
+      practitionerName: practitioner.name,
+    });
   }
 
-  if (!available.length) return [];
+  return available;
+}
 
-  const effectiveTargetHourMinutes = shouldPriorityOverrideTargetHour(priorityPreference)
-    ? null
-    : targetHourMinutes;
+function sortSameDayAlternatives({
+  slots,
+  targetHourMinutes,
+  timezone,
+  maxSuggestions,
+}) {
+  const sorted = sortSlotsByTargetHour(slots, targetHourMinutes, timezone);
+  return dedupeSlots(sorted).slice(0, maxSuggestions);
+}
 
-  if (Number.isFinite(effectiveTargetHourMinutes)) {
-    return narrowSlotsAroundTargetHour(available, effectiveTargetHourMinutes, maxSuggestions);
-  }
+function buildSuggestResponse({
+  status,
+  slots,
+  speech,
+  context = {},
+}) {
+  return {
+    status,
+    slots: slots || [],
+    speech: speech || "",
+    context,
+  };
+}
 
-  const prioritized = sortAvailableSlotsByPriority(available, priorityPreference);
+function formatSlotFR(dateOrIso, timezone = DEFAULT_TIMEZONE) {
+  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  if (Number.isNaN(d.getTime())) return "une date invalide";
 
-  if (priorityPreference === "LATEST") {
-    return prioritized
-      .slice(0, maxSuggestions)
-      .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
-  }
+  const datePart = d.toLocaleDateString("fr-FR", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    timeZone: timezone,
+  });
 
-  return prioritized.slice(0, maxSuggestions);
+  const timePart = d.toLocaleTimeString("fr-FR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: timezone,
+  });
+
+  return `${datePart} à ${timePart}`;
 }
 
 async function createAppointment({
@@ -724,14 +1151,20 @@ async function createAppointment({
   phone,
   appointmentType,
   durationMinutes,
+  cabinet,
 }) {
   const calendar = await getCalendarClient();
+  const timezone = getTimeZoneForCabinet(cabinet);
 
   const start = new Date(startDate);
   let end = new Date(endDate);
 
   if (!(end > start)) {
-    const effectiveMinutes = resolveSlotMinutes({ durationMinutes, appointmentType });
+    const effectiveMinutes = resolveSlotMinutes({
+      durationMinutes,
+      appointmentType,
+      cabinet,
+    });
     end = new Date(start);
     end.setMinutes(end.getMinutes() + effectiveMinutes);
   }
@@ -758,8 +1191,8 @@ async function createAppointment({
   const event = {
     summary: `RDV kiné - ${patientName || "Patient"}`,
     description,
-    start: { dateTime: startIso, timeZone: TIMEZONE },
-    end: { dateTime: endIso, timeZone: TIMEZONE },
+    start: { dateTime: startIso, timeZone: timezone },
+    end: { dateTime: endIso, timeZone: timezone },
   };
 
   const res = await calendar.events.insert({
@@ -770,8 +1203,14 @@ async function createAppointment({
   return res.data;
 }
 
-async function isSlotAvailable({ calendarId = "primary", startDate, endDate }) {
+async function isSlotAvailable({
+  calendarId = "primary",
+  startDate,
+  endDate,
+  cabinet,
+}) {
   const calendar = await getCalendarClient();
+  const timezone = getTimeZoneForCabinet(cabinet);
 
   const start = new Date(startDate);
   const end = new Date(endDate);
@@ -784,7 +1223,7 @@ async function isSlotAvailable({ calendarId = "primary", startDate, endDate }) {
     requestBody: {
       timeMin: start.toISOString(),
       timeMax: end.toISOString(),
-      timeZone: TIMEZONE,
+      timeZone: timezone,
       items: [{ id: calendarId }],
     },
   });
@@ -802,12 +1241,18 @@ async function bookAppointmentSafe({
   phone,
   appointmentType,
   durationMinutes,
+  cabinet = null,
 }) {
+  const effectiveCabinet = cabinet || getDefaultCabinet();
   const start = new Date(startDate);
   let end = new Date(endDate);
 
   if (!(end > start)) {
-    const effectiveMinutes = resolveSlotMinutes({ durationMinutes, appointmentType });
+    const effectiveMinutes = resolveSlotMinutes({
+      durationMinutes,
+      appointmentType,
+      cabinet: effectiveCabinet,
+    });
     end = new Date(start);
     end.setMinutes(end.getMinutes() + effectiveMinutes);
   }
@@ -822,6 +1267,7 @@ async function bookAppointmentSafe({
       calendarId,
       startDate: start,
       endDate: end,
+      cabinet: effectiveCabinet,
     });
 
     if (!ok) return { ok: false, code: "TAKEN" };
@@ -835,6 +1281,7 @@ async function bookAppointmentSafe({
       phone,
       appointmentType,
       durationMinutes,
+      cabinet: effectiveCabinet,
     });
 
     return { ok: true, event };
@@ -854,61 +1301,100 @@ function assertPractitioners(practitioners) {
   }
 }
 
+function buildCutoff(now, minLeadMinutes) {
+  const cutoff = new Date(now);
+  cutoff.setMinutes(cutoff.getMinutes() + minLeadMinutes);
+  return cutoff;
+}
+
+function getSameDaySlots(slots, dateKey, timezone) {
+  return (slots || []).filter(
+    (slot) => getDateKeyInTimezone(slot.start, timezone) === dateKey
+  );
+}
+
 async function suggestTwoSlotsNext7Days({
   practitioners,
-  days = DEFAULT_LOOKAHEAD_DAYS,
+  days,
   durationMinutes,
   appointmentType,
   timePreference = null,
   targetHourMinutes = null,
   priorityPreference = null,
-  maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
-  minLeadMinutes = DEFAULT_MIN_LEAD_MINUTES,
+  maxSuggestions,
+  minLeadMinutes,
 }) {
   assertPractitioners(practitioners);
 
+  const { cabinet, timezone } = getCalendarClientCachedMeta(practitioners);
   const calendar = await getCalendarClient();
-  const slotMinutes = resolveSlotMinutes({ durationMinutes, appointmentType });
+
+  const effectiveDays = Number.isFinite(Number(days))
+    ? Number(days)
+    : getCabinetLookaheadDays(cabinet);
+
+  const effectiveMaxSuggestions = Number.isFinite(Number(maxSuggestions))
+    ? Number(maxSuggestions)
+    : getCabinetMaxSuggestions(cabinet);
+
+  const effectiveMinLeadMinutes = Number.isFinite(Number(minLeadMinutes))
+    ? Number(minLeadMinutes)
+    : getCabinetMinLeadMinutes(cabinet);
+
+  const slotMinutes = resolveSlotMinutes({
+    durationMinutes,
+    appointmentType,
+    cabinet,
+  });
 
   const now = new Date();
   const timeMin = new Date(now);
   const timeMax = new Date(now);
-  timeMax.setDate(timeMax.getDate() + days);
+  timeMax.setDate(timeMax.getDate() + effectiveDays);
 
   const busyEntries = await Promise.all(
     practitioners.map(async (p) => {
-      const busy = await getBusyPeriods(calendar, p.calendarId, timeMin, timeMax);
+      const busy = await getBusyPeriods(
+        calendar,
+        p.calendarId,
+        timeMin,
+        timeMax,
+        timezone
+      );
       return [p.calendarId, busy];
     })
   );
 
   const busyByCal = Object.fromEntries(busyEntries);
-  const candidates = generateCandidateSlots(now, days, slotMinutes);
+  const candidates = generateCandidateSlots({
+    startDate: now,
+    days: effectiveDays,
+    slotMinutes,
+    cabinet,
+  });
 
-  const cutoff = new Date(now);
-  cutoff.setMinutes(cutoff.getMinutes() + minLeadMinutes);
+  const cutoff = buildCutoff(now, effectiveMinLeadMinutes);
 
   const available = selectAvailableSlots({
     candidates,
     practitioners,
     busyByCal,
     cutoff,
-    maxSuggestions,
+    maxSuggestions: effectiveMaxSuggestions,
     timePreference,
     targetHourMinutes,
     priorityPreference,
+    timezone,
   });
 
   logInfo("SUGGEST_NEXT_7_DAYS", {
     practitioners: practitioners.map((p) => p.name),
-    days,
+    cabinetKey: cabinet?.key || null,
+    days: effectiveDays,
     slotMinutes,
     appointmentType: appointmentType || null,
     timePreference: timePreference?.key || timePreference || null,
     targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
-    effectiveTargetHourMinutes: shouldPriorityOverrideTargetHour(priorityPreference)
-      ? null
-      : (Number.isFinite(targetHourMinutes) ? targetHourMinutes : null),
     priorityPreference,
     results: available.map((slot) => ({
       start: slot.start.toISOString(),
@@ -917,102 +1403,331 @@ async function suggestTwoSlotsNext7Days({
     })),
   });
 
-  return {
-    slots: available.slice(0, maxSuggestions),
-    speech: buildSlotSpeech(available.slice(0, maxSuggestions), {
-      emptySpeech: "Je n’ai pas de créneau disponible sur les 7 prochains jours.",
+  return buildSuggestResponse({
+    status: available.length ? "AVAILABLE" : "NO_AVAILABILITY",
+    slots: available.slice(0, effectiveMaxSuggestions),
+    speech: buildSlotSpeech(available.slice(0, effectiveMaxSuggestions), {
+      emptySpeech: "Je n’ai pas de créneau disponible sur les prochains jours.",
       timePreference,
       targetHourMinutes: shouldPriorityOverrideTargetHour(priorityPreference)
         ? null
         : targetHourMinutes,
       priorityPreference,
+      timezone,
     }),
-  };
+    context: {
+      cabinetKey: cabinet?.key || null,
+      timezone,
+      slotMinutes,
+    },
+  });
 }
 
 async function suggestTwoSlotsFromDate({
   practitioners,
   fromDate,
-  days = DEFAULT_LOOKAHEAD_DAYS,
+  days,
   durationMinutes,
   appointmentType,
   timePreference = null,
   targetHourMinutes = null,
   priorityPreference = null,
-  maxSuggestions = DEFAULT_MAX_SUGGESTIONS,
-  minLeadMinutes = DEFAULT_MIN_LEAD_MINUTES,
+  maxSuggestions,
+  minLeadMinutes,
 }) {
   assertPractitioners(practitioners);
 
+  const { cabinet, timezone } = getCalendarClientCachedMeta(practitioners);
   const calendar = await getCalendarClient();
-  const slotMinutes = resolveSlotMinutes({ durationMinutes, appointmentType });
+
+  const effectiveDays = Number.isFinite(Number(days))
+    ? Number(days)
+    : getCabinetLookaheadDays(cabinet);
+
+  const effectiveMaxSuggestions = Number.isFinite(Number(maxSuggestions))
+    ? Number(maxSuggestions)
+    : getCabinetMaxSuggestions(cabinet);
+
+  const effectiveMinLeadMinutes = Number.isFinite(Number(minLeadMinutes))
+    ? Number(minLeadMinutes)
+    : getCabinetMinLeadMinutes(cabinet);
+
+  const slotMinutes = resolveSlotMinutes({
+    durationMinutes,
+    appointmentType,
+    cabinet,
+  });
 
   const start = new Date(fromDate);
   const timeMax = new Date(start);
-  timeMax.setDate(timeMax.getDate() + days);
+  timeMax.setDate(timeMax.getDate() + effectiveDays);
 
   const busyEntries = await Promise.all(
     practitioners.map(async (p) => {
-      const busy = await getBusyPeriods(calendar, p.calendarId, start, timeMax);
+      const busy = await getBusyPeriods(
+        calendar,
+        p.calendarId,
+        start,
+        timeMax,
+        timezone
+      );
       return [p.calendarId, busy];
     })
   );
 
   const busyByCal = Object.fromEntries(busyEntries);
-  const candidates = generateCandidateSlots(start, days, slotMinutes);
+
+  const candidates = generateCandidateSlots({
+    startDate: start,
+    days: effectiveDays,
+    slotMinutes,
+    cabinet,
+  });
 
   const now = new Date();
-  const cutoff = new Date(now);
-  cutoff.setMinutes(cutoff.getMinutes() + minLeadMinutes);
-
+  const cutoff = buildCutoff(now, effectiveMinLeadMinutes);
   const effectiveCutoff = start > cutoff ? start : cutoff;
 
-  const available = selectAvailableSlots({
+  const requestedDateKey = getDateKeyInTimezone(start, timezone);
+  const dayAvailability = getCabinetDayAvailability(start, cabinet);
+
+  if (dayAvailability.isClosed) {
+    const speech = buildClosedSpeech({
+      status: "CABINET_CLOSED_DAY",
+      reason: dayAvailability.reason,
+      ranges: dayAvailability.ranges,
+    });
+
+    logInfo("SUGGEST_FROM_DATE_CLOSED_DAY", {
+      cabinetKey: cabinet?.key || null,
+      requestedDateKey,
+      reason: dayAvailability.reason || null,
+    });
+
+    return buildSuggestResponse({
+      status: "CABINET_CLOSED_DAY",
+      slots: [],
+      speech,
+      context: {
+        cabinetKey: cabinet?.key || null,
+        timezone,
+        requestedDateKey,
+        reason: dayAvailability.reason || null,
+        ranges: dayAvailability.ranges || [],
+      },
+    });
+  }
+
+  const availableAll = selectAvailableSlots({
     candidates,
     practitioners,
     busyByCal,
     cutoff: effectiveCutoff,
-    maxSuggestions,
+    maxSuggestions: Math.max(effectiveMaxSuggestions, 8),
     timePreference,
-    targetHourMinutes,
-    priorityPreference,
-  });
-
-  logInfo("SUGGEST_FROM_DATE", {
-    practitioners: practitioners.map((p) => p.name),
-    fromDate: start.toISOString(),
-    days,
-    slotMinutes,
-    appointmentType: appointmentType || null,
-    timePreference: timePreference?.key || timePreference || null,
-    targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
-    effectiveTargetHourMinutes: shouldPriorityOverrideTargetHour(priorityPreference)
+    targetHourMinutes: shouldPriorityOverrideTargetHour(priorityPreference)
       ? null
-      : (Number.isFinite(targetHourMinutes) ? targetHourMinutes : null),
+      : targetHourMinutes,
     priorityPreference,
-    results: available.map((slot) => ({
-      start: slot.start.toISOString(),
-      end: slot.end.toISOString(),
-      practitionerName: slot.practitionerName,
-    })),
+    timezone,
   });
 
-  return {
-    slots: available.slice(0, maxSuggestions),
-    speech: buildSlotSpeech(available.slice(0, maxSuggestions), {
+  const sameDayAvailableAll = getSameDaySlots(
+    availableAll,
+    requestedDateKey,
+    timezone
+  );
+
+  const exactRequestedHourActive =
+    Number.isFinite(targetHourMinutes) &&
+    !shouldPriorityOverrideTargetHour(priorityPreference);
+
+  if (exactRequestedHourActive) {
+    const requestedStartMinutes = targetHourMinutes;
+    const requestedEndMinutes = targetHourMinutes + slotMinutes;
+
+    if (
+      !isWithinRangesByMinutes(
+        requestedStartMinutes,
+        requestedEndMinutes,
+        dayAvailability.ranges
+      )
+    ) {
+      const sameDayAlternatives = sortSameDayAlternatives({
+        slots: sameDayAvailableAll,
+        targetHourMinutes,
+        timezone,
+        maxSuggestions: effectiveMaxSuggestions,
+      });
+
+      return buildSuggestResponse({
+        status: "OUTSIDE_OPENING_HOURS",
+        slots: sameDayAlternatives,
+        speech: buildClosedSpeech({
+          status: "OUTSIDE_OPENING_HOURS",
+          reason: null,
+          ranges: dayAvailability.ranges,
+        }),
+        context: {
+          cabinetKey: cabinet?.key || null,
+          timezone,
+          requestedDateKey,
+          targetHourMinutes,
+          ranges: dayAvailability.ranges,
+          sameDayAlternativesCount: sameDayAlternatives.length,
+        },
+      });
+    }
+
+    const exactStart = dateAtLocalMinutes(start, targetHourMinutes);
+    const exactEnd = new Date(exactStart);
+    exactEnd.setMinutes(exactEnd.getMinutes() + slotMinutes);
+
+    const exactSlots = buildExactRequestedSlots({
+      requestedDate: { start: exactStart, end: exactEnd },
+      practitioners,
+      busyByCal,
+    }).filter((slot) => slot.start >= effectiveCutoff);
+
+    if (exactSlots.length) {
+      const sameDayAlternatives = sortSameDayAlternatives({
+        slots: sameDayAvailableAll.filter(
+          (slot) => slotUniqueKey(slot) !== slotUniqueKey(exactSlots[0])
+        ),
+        targetHourMinutes,
+        timezone,
+        maxSuggestions: Math.max(0, effectiveMaxSuggestions - 1),
+      });
+
+      const finalSlots = dedupeSlots([
+        exactSlots[0],
+        ...sameDayAlternatives,
+      ]).slice(0, effectiveMaxSuggestions);
+
+      return buildSuggestResponse({
+        status: "REQUESTED_TIME_AVAILABLE",
+        slots: finalSlots,
+        speech: buildSlotSpeech(finalSlots, {
+          targetHourMinutes,
+          timezone,
+        }),
+        context: {
+          cabinetKey: cabinet?.key || null,
+          timezone,
+          requestedDateKey,
+          targetHourMinutes,
+          exactMatch: true,
+        },
+      });
+    }
+
+    if (sameDayAvailableAll.length) {
+      const sameDayAlternatives = sortSameDayAlternatives({
+        slots: sameDayAvailableAll,
+        targetHourMinutes,
+        timezone,
+        maxSuggestions: effectiveMaxSuggestions,
+      });
+
+      return buildSuggestResponse({
+        status: "REQUESTED_TIME_TAKEN_SAME_DAY_ALTERNATIVES",
+        slots: sameDayAlternatives,
+        speech: "Le créneau demandé n’est plus disponible.",
+        context: {
+          cabinetKey: cabinet?.key || null,
+          timezone,
+          requestedDateKey,
+          targetHourMinutes,
+        },
+      });
+    }
+  }
+
+  if (sameDayAvailableAll.length) {
+    const sameDayPreferred = Number.isFinite(targetHourMinutes)
+      ? sortSameDayAlternatives({
+          slots: sameDayAvailableAll,
+          targetHourMinutes,
+          timezone,
+          maxSuggestions: effectiveMaxSuggestions,
+        })
+      : sortAvailableSlotsByPriority(
+          sameDayAvailableAll,
+          priorityPreference
+        ).slice(0, effectiveMaxSuggestions);
+
+    return buildSuggestResponse({
+      status: "SAME_DAY_ALTERNATIVES",
+      slots: sameDayPreferred,
+      speech: buildSlotSpeech(sameDayPreferred, {
+        timePreference,
+        targetHourMinutes,
+        priorityPreference,
+        timezone,
+      }),
+      context: {
+        cabinetKey: cabinet?.key || null,
+        timezone,
+        requestedDateKey,
+      },
+    });
+  }
+
+  const fallbackAvailable = sortAvailableSlotsByPriority(
+    availableAll,
+    priorityPreference
+  ).slice(0, effectiveMaxSuggestions);
+
+  if (fallbackAvailable.length) {
+    return buildSuggestResponse({
+      status: "NO_AVAILABILITY_ON_REQUESTED_DAY",
+      slots: fallbackAvailable,
+      speech: buildSlotSpeech(fallbackAvailable, {
+        timePreference,
+        targetHourMinutes,
+        priorityPreference,
+        timezone,
+      }),
+      context: {
+        cabinetKey: cabinet?.key || null,
+        timezone,
+        requestedDateKey,
+      },
+    });
+  }
+
+  logInfo("SUGGEST_FROM_DATE_NO_AVAILABILITY", {
+    cabinetKey: cabinet?.key || null,
+    requestedDateKey,
+    timePreference: timePreference?.key || timePreference || null,
+    targetHourMinutes: Number.isFinite(targetHourMinutes)
+      ? targetHourMinutes
+      : null,
+    priorityPreference: priorityPreference || null,
+  });
+
+  return buildSuggestResponse({
+    status: "NO_AVAILABILITY",
+    slots: [],
+    speech: buildSlotSpeech([], {
       emptySpeech: "Je n’ai pas trouvé de disponibilité à partir de cette date.",
       timePreference,
-      targetHourMinutes: shouldPriorityOverrideTargetHour(priorityPreference)
-        ? null
-        : targetHourMinutes,
+      targetHourMinutes,
       priorityPreference,
+      timezone,
     }),
-  };
+    context: {
+      cabinetKey: cabinet?.key || null,
+      timezone,
+      requestedDateKey,
+    },
+  });
 }
 
 async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
   assertPractitioners(practitioners);
 
+  const { cabinet, timezone } = getCalendarClientCachedMeta(practitioners);
   const calendar = await getCalendarClient();
   const phoneNorm = normalizePhone(phone);
 
@@ -1071,6 +1786,8 @@ async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
     startISO: best.startISO,
     summary: best.summary,
     patientName: best.patientName,
+    timezone,
+    cabinetKey: cabinet?.key || null,
   };
 }
 
