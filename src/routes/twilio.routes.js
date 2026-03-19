@@ -87,7 +87,7 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
         action: actionUrl,
         method: "POST",
         hints:
-            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, apres-midi, fin d'apres-midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
+            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
         ...overrides,
     });
 }
@@ -634,6 +634,25 @@ function detectTimePreference(text) {
     if (!t) return null;
 
     if (
+        t.includes("debut de matinee") ||
+        t.includes("debut de matine") ||
+        t.includes("en debut de matinee") ||
+        t.includes("en debut de matine") ||
+        t.includes("tot le matin")
+    ) {
+        return "EARLY_MORNING";
+    }
+
+    if (
+        t.includes("fin de matinee") ||
+        t.includes("fin de matine") ||
+        t.includes("en fin de matinee") ||
+        t.includes("en fin de matine")
+    ) {
+        return "LATE_MORNING";
+    }
+
+    if (
         t.includes("fin d'apres midi") ||
         t.includes("fin dapres midi") ||
         t.includes("fin d apres midi") ||
@@ -666,7 +685,7 @@ function detectTimePreference(text) {
         return "EVENING";
     }
 
-    if (t.includes("matin") || t.includes("matinee")) {
+    if (t.includes("matin") || t.includes("matinee") || t.includes("matine")) {
         return "MORNING";
     }
 
@@ -759,16 +778,20 @@ function slotMatchesTimePreference(slot, preference) {
     if (!Number.isFinite(minutes)) return true;
 
     switch (preference) {
+        case "EARLY_MORNING":
+            return minutes >= 8 * 60 && minutes < 10 * 60;
+        case "LATE_MORNING":
+            return minutes >= 10 * 60 && minutes < 12 * 60;
         case "MORNING":
             return minutes >= 8 * 60 && minutes < 12 * 60;
         case "EARLY_AFTERNOON":
             return minutes >= 14 * 60 && minutes < 16 * 60;
         case "AFTERNOON":
-            return minutes >= 14 * 60 && minutes < 17 * 60;
+            return minutes >= 14 * 60 && minutes < 19 * 60;
         case "LATE_AFTERNOON":
             return minutes >= 17 * 60 && minutes < 19 * 60;
         case "EVENING":
-            return minutes >= 18 * 60 && minutes < 21 * 60;
+            return minutes >= 18 * 60 && minutes < 19 * 60;
         default:
             return true;
     }
@@ -781,6 +804,10 @@ function filterSlotsByTimePreference(slots, preference) {
 
 function describeTimePreference(preference) {
     switch (preference) {
+        case "EARLY_MORNING":
+            return "en début de matinée";
+        case "LATE_MORNING":
+            return "en fin de matinée";
         case "MORNING":
             return "le matin";
         case "EARLY_AFTERNOON":
@@ -1030,7 +1057,7 @@ function askActionMenu(vr, session, intro = "") {
     const gather = gatherSpeech(vr, "/twilio/voice", {
         numDigits: 1,
         hints:
-            "prendre rendez-vous, prendre, rendez-vous, rdv, reserver, booker, modifier, changer, deplacer, reporter, annuler, supprimer, retirer, 1, 2, 3",
+            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
     });
 
     gather.say(SAY_OPTS, prompt);
@@ -1825,7 +1852,7 @@ router.post("/voice", async (req, res) => {
             const gather = gatherSpeech(vr, "/twilio/voice", {
                 numDigits: 1,
                 hints:
-                    "prendre rendez-vous, prendre, rendez-vous, rdv, reserver, booker, modifier, changer, deplacer, reporter, annuler, supprimer, retirer, 1, 2, 3",
+                    "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
             });
 
             setPrompt(
@@ -2151,6 +2178,14 @@ router.post("/voice", async (req, res) => {
         if (session.step === "BOOK_ASK_PREFERRED_DATE") {
             const requestedDateISO = parseRequestedDate(speech);
 
+            if (!requestedDateISO && hasPreferenceRefinementRequest(speech)) {
+                session.slots = [];
+                session.pendingSlot = null;
+                session.requestedDateISO = null;
+
+                return proposeBookingSlots({ vr, res, session, callSid, cabinet });
+            }
+
             if (!requestedDateISO) {
                 const retry = handleRetry(vr, res, session, callSid, "BOOK_ASK_PREFERRED_DATE");
                 if (retry) return retry;
@@ -2158,7 +2193,7 @@ router.post("/voice", async (req, res) => {
                 promptAndGather(
                     vr,
                     session,
-                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain, le 18 mars, ou mercredi en fin d'après-midi."
+                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain, le 18 mars, ou simplement début de matinée, fin de matinée, début d'après-midi ou fin d'après-midi."
                 );
                 return sendTwiml(res, vr);
             }
@@ -2752,6 +2787,16 @@ router.post("/voice", async (req, res) => {
         if (session.step === "MODIFY_ASK_PREFERRED_DATE") {
             const requestedDateISO = parseRequestedDate(speech);
 
+            if (!requestedDateISO && hasPreferenceRefinementRequest(speech)) {
+                session.slots = [];
+                session.pendingSlot = null;
+                session.requestedDateISO = null;
+                session.step = "MODIFY_PROPOSE_NEW";
+                setPrompt(session, "");
+                vr.redirect({ method: "POST" }, "/twilio/voice");
+                return sendTwiml(res, vr);
+            }
+
             if (!requestedDateISO) {
                 const retry = handleRetry(vr, res, session, callSid, "MODIFY_ASK_PREFERRED_DATE");
                 if (retry) return retry;
@@ -2759,7 +2804,7 @@ router.post("/voice", async (req, res) => {
                 promptAndGather(
                     vr,
                     session,
-                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain, le 18 mars, ou mercredi en fin d'après-midi."
+                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain, le 18 mars, ou simplement début de matinée, fin de matinée, début d'après-midi ou fin d'après-midi."
                 );
                 return sendTwiml(res, vr);
             }

@@ -18,8 +18,12 @@ const TIME_PREFERENCE_RULES = {
         keywords: [
             "debut de matinee",
             "début de matinée",
+            "debut de matine",
+            "début de matiné",
             "en debut de matinee",
             "en début de matinée",
+            "en debut de matine",
+            "en début de matiné",
             "tot le matin",
             "tôt le matin",
             "vers 8h",
@@ -35,15 +39,18 @@ const TIME_PREFERENCE_RULES = {
         keywords: [
             "fin de matinee",
             "fin de matinée",
+            "fin de matine",
+            "fin de matiné",
             "en fin de matinee",
             "en fin de matinée",
+            "en fin de matine",
+            "en fin de matiné",
             "vers 10h",
             "vers 11h",
         ],
         startMinutes: 10 * 60,
         endMinutes: 12 * 60,
     },
-
     MORNING: {
         key: "MORNING",
         label: "le matin",
@@ -120,7 +127,7 @@ const TIME_PREFERENCE_RULES = {
         label: "en soirée",
         keywords: ["soir", "soiree", "soirée", "en soiree", "en soirée"],
         startMinutes: 18 * 60,
-        endMinutes: 21 * 60,
+        endMinutes: 19 * 60,
     },
 };
 
@@ -435,16 +442,26 @@ function buildClosedSpeech({ status, reason, ranges }) {
     return "Le cabinet est fermé.";
 }
 
-function dateAtLocalMinutes(dayDate, totalMinutes) {
-    const d = new Date(dayDate);
-    d.setHours(0, 0, 0, 0);
-    d.setMinutes(totalMinutes, 0, 0);
-    return d;
+function dateAtMinutesInTimezone(dayDate, totalMinutes, timezone = DEFAULT_TIMEZONE) {
+    const { year, month, day } = getDatePartsInTimezone(dayDate, timezone);
+
+    const hour = Math.floor(totalMinutes / 60);
+    const minute = totalMinutes % 60;
+
+    const utcGuess = new Date(Date.UTC(year, month - 1, day, hour, minute, 0, 0));
+
+    const tzAsLocal = new Date(
+        utcGuess.toLocaleString("en-US", { timeZone: timezone })
+    );
+
+    const offsetMs = utcGuess.getTime() - tzAsLocal.getTime();
+
+    return new Date(utcGuess.getTime() + offsetMs);
 }
 
-function dateAtTime(dayDate, hhmm) {
+function dateAtTime(dayDate, hhmm, timezone = DEFAULT_TIMEZONE) {
     const totalMinutes = parseHHMMToMinutes(hhmm);
-    return dateAtLocalMinutes(dayDate, totalMinutes);
+    return dateAtMinutesInTimezone(dayDate, totalMinutes, timezone);
 }
 
 function getEasterDateUTC(year) {
@@ -944,8 +961,8 @@ function generateCandidateSlots({
         if (availability.isClosed || !availability.ranges.length) continue;
 
         for (const range of availability.ranges) {
-            let cursor = dateAtTime(day, range.start);
-            const end = dateAtTime(day, range.end);
+            let cursor = dateAtTime(day, range.start, timezone);
+            const end = dateAtTime(day, range.end, timezone);
 
             while (cursor < end) {
                 const slotStart = new Date(cursor);
@@ -1610,7 +1627,7 @@ async function suggestTwoSlotsFromDate({
             });
         }
 
-        const exactStart = dateAtLocalMinutes(start, targetHourMinutes);
+        const exactStart = dateAtMinutesInTimezone(start, targetHourMinutes, timezone);
         const exactEnd = new Date(exactStart);
         exactEnd.setMinutes(exactEnd.getMinutes() + slotMinutes);
 
