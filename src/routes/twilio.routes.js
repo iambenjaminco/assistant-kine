@@ -775,26 +775,52 @@ function slotMatchesTimePreference(slot, preference) {
     if (!slot?.start || !preference) return true;
 
     const minutes = getMinutesInParis(slot.start);
-    if (!Number.isFinite(minutes)) return true;
+    if (!Number.isFinite(minutes)) {
+        logWarn("TIME_FILTER_INVALID_MINUTES", {
+            slotStart: slot?.start || null,
+            preference,
+        });
+        return true;
+    }
+
+    let matched = true;
 
     switch (preference) {
         case "EARLY_MORNING":
-            return minutes >= 8 * 60 && minutes < 10 * 60;
+            matched = minutes >= 8 * 60 && minutes < 10 * 60;
+            break;
         case "LATE_MORNING":
-            return minutes >= 10 * 60 && minutes < 12 * 60;
+            matched = minutes >= 10 * 60 && minutes < 12 * 60;
+            break;
         case "MORNING":
-            return minutes >= 8 * 60 && minutes < 12 * 60;
+            matched = minutes >= 8 * 60 && minutes < 12 * 60;
+            break;
         case "EARLY_AFTERNOON":
-            return minutes >= 14 * 60 && minutes < 16 * 60;
+            matched = minutes >= 14 * 60 && minutes < 16 * 60;
+            break;
         case "AFTERNOON":
-            return minutes >= 14 * 60 && minutes < 19 * 60;
+            matched = minutes >= 14 * 60 && minutes < 19 * 60;
+            break;
         case "LATE_AFTERNOON":
-            return minutes >= 17 * 60 && minutes < 19 * 60;
+            matched = minutes >= 17 * 60 && minutes < 19 * 60;
+            break;
         case "EVENING":
-            return minutes >= 18 * 60 && minutes < 19 * 60;
+            matched = minutes >= 18 * 60 && minutes < 19 * 60;
+            break;
         default:
-            return true;
+            matched = true;
+            break;
     }
+
+    logInfo("TIME_FILTER_CHECK", {
+        slotStart: slot.start,
+        practitionerName: slot.practitionerName || null,
+        preference,
+        minutesInParis: minutes,
+        matched,
+    });
+
+    return matched;
 }
 
 function filterSlotsByTimePreference(slots, preference) {
@@ -1316,6 +1342,18 @@ function getPhoneConfirmPrompt(phone) {
 function getFilteredSlotsResponse(session, slots, fallbackPrompt) {
     const filtered = filterSlotsByTimePreference(slots, session.preferredTimeWindow);
 
+    logInfo("TIME_FILTER_RESULT", {
+        preferredTimeWindow: session.preferredTimeWindow || null,
+        preferredHourMinutes: Number.isFinite(session.preferredHourMinutes)
+            ? session.preferredHourMinutes
+            : null,
+        priorityPreference: session.priorityPreference || null,
+        beforeCount: (slots || []).length,
+        afterCount: (filtered || []).length,
+        beforeSlots: summarizeSlots(slots || []),
+        afterSlots: summarizeSlots(filtered || []),
+    });
+
     if (filtered.length) {
         return {
             slots: filtered,
@@ -1734,7 +1772,6 @@ router.post("/voice", async (req, res) => {
         digits,
         confidence: req.body?.Confidence || null,
         hasInput: Boolean(speech || digits),
-        rawBody: req.body,
     });
 
     const cabinet = getCabinetOrFail(vr);
@@ -1787,7 +1824,29 @@ router.post("/voice", async (req, res) => {
     if (hasInput) {
         session.noInputCount = 0;
         resetRetry(session);
+
+        const beforePrefs = {
+            preferredTimeWindow: session.preferredTimeWindow || null,
+            preferredHourMinutes: Number.isFinite(session.preferredHourMinutes)
+                ? session.preferredHourMinutes
+                : null,
+            priorityPreference: session.priorityPreference || null,
+        };
+
         updateTimePreferenceFromSpeech(session, speech, { clearOnExplicitNone: true });
+
+        logInfo("TIME_PREFERENCE_UPDATED", {
+            callSid,
+            speech,
+            before: beforePrefs,
+            after: {
+                preferredTimeWindow: session.preferredTimeWindow || null,
+                preferredHourMinutes: Number.isFinite(session.preferredHourMinutes)
+                    ? session.preferredHourMinutes
+                    : null,
+                priorityPreference: session.priorityPreference || null,
+            },
+        });
     }
 
     try {
@@ -1946,6 +2005,13 @@ router.post("/voice", async (req, res) => {
             session.appointmentDurationMinutes =
                 detectedType === "FIRST" ? durations.first : durations.followUp;
 
+            logInfo("APPOINTMENT_TYPE_SET", {
+                callSid,
+                appointmentType: session.appointmentType,
+                appointmentDurationMinutes: session.appointmentDurationMinutes,
+                speech,
+            });
+
             session.step = "BOOK_ASK_PRACTITIONER_PREF";
             promptAndGather(
                 vr,
@@ -1965,18 +2031,42 @@ router.post("/voice", async (req, res) => {
             if (practitioner) {
                 session.preferredPractitioner = practitioner;
                 session.practitionerPreferenceMode = "SPECIFIC";
+
+                logInfo("PRACTITIONER_PREFERENCE_SET", {
+                    callSid,
+                    practitionerPreferenceMode: "SPECIFIC",
+                    preferredPractitioner: session.preferredPractitioner?.name || null,
+                    speech,
+                });
+
                 return proposeBookingSlots({ vr, res, session, callSid, cabinet });
             }
 
             if (noPreference || yesNo === false) {
                 session.preferredPractitioner = null;
                 session.practitionerPreferenceMode = "ANY";
+
+                logInfo("PRACTITIONER_PREFERENCE_SET", {
+                    callSid,
+                    practitionerPreferenceMode: "ANY",
+                    preferredPractitioner: null,
+                    speech,
+                });
+
                 return proposeBookingSlots({ vr, res, session, callSid, cabinet });
             }
 
             if (usual) {
                 session.wantsUsualPractitioner = true;
                 session.practitionerPreferenceMode = "USUAL";
+
+                logInfo("PRACTITIONER_PREFERENCE_SET", {
+                    callSid,
+                    practitionerPreferenceMode: "USUAL",
+                    preferredPractitioner: null,
+                    speech,
+                });
+
                 session.step = "BOOK_ASK_USUAL_PRACTITIONER";
                 promptAndGather(vr, session, "Avec quel kiné êtes-vous habituellement suivi ?", "Très bien.");
                 return sendTwiml(res, vr);
@@ -1984,6 +2074,14 @@ router.post("/voice", async (req, res) => {
 
             if (yesNo === true) {
                 session.practitionerPreferenceMode = "SPECIFIC";
+
+                logInfo("PRACTITIONER_PREFERENCE_SET", {
+                    callSid,
+                    practitionerPreferenceMode: "SPECIFIC",
+                    preferredPractitioner: null,
+                    speech,
+                });
+
                 session.step = "BOOK_ASK_SPECIFIC_PRACTITIONER_NAME";
                 promptAndGather(vr, session, "D'accord. Quel est le nom du kiné souhaité ?");
                 return sendTwiml(res, vr);
@@ -2007,12 +2105,28 @@ router.post("/voice", async (req, res) => {
             if (practitioner) {
                 session.preferredPractitioner = practitioner;
                 session.practitionerPreferenceMode = "SPECIFIC";
+
+                logInfo("PRACTITIONER_PREFERENCE_SET", {
+                    callSid,
+                    practitionerPreferenceMode: "SPECIFIC",
+                    preferredPractitioner: session.preferredPractitioner?.name || null,
+                    speech,
+                });
+
                 return proposeBookingSlots({ vr, res, session, callSid, cabinet });
             }
 
             if (noPreference) {
                 session.preferredPractitioner = null;
                 session.practitionerPreferenceMode = "ANY";
+
+                logInfo("PRACTITIONER_PREFERENCE_SET", {
+                    callSid,
+                    practitionerPreferenceMode: "ANY",
+                    preferredPractitioner: null,
+                    speech,
+                });
+
                 return proposeBookingSlots({ vr, res, session, callSid, cabinet });
             }
 
@@ -2034,12 +2148,28 @@ router.post("/voice", async (req, res) => {
             if (practitioner) {
                 session.preferredPractitioner = practitioner;
                 session.practitionerPreferenceMode = "SPECIFIC";
+
+                logInfo("PRACTITIONER_PREFERENCE_SET", {
+                    callSid,
+                    practitionerPreferenceMode: "SPECIFIC",
+                    preferredPractitioner: session.preferredPractitioner?.name || null,
+                    speech,
+                });
+
                 return proposeBookingSlots({ vr, res, session, callSid, cabinet });
             }
 
             if (noPreference) {
                 session.preferredPractitioner = null;
                 session.practitionerPreferenceMode = "ANY";
+
+                logInfo("PRACTITIONER_PREFERENCE_SET", {
+                    callSid,
+                    practitionerPreferenceMode: "ANY",
+                    preferredPractitioner: null,
+                    speech,
+                });
+
                 return proposeBookingSlots({ vr, res, session, callSid, cabinet });
             }
 
@@ -2105,6 +2235,12 @@ router.post("/voice", async (req, res) => {
             }
 
             if (detectAlternativeRequest(t)) {
+                logInfo("ALTERNATIVE_REQUEST_DETECTED", {
+                    callSid,
+                    step: session.step,
+                    speech,
+                    lastProposedStartISO: session.lastProposedStartISO || null,
+                });
                 if (session.lastProposedStartISO) {
                     return proposeSlotsFromRequestedDate({
                         vr,
@@ -2165,6 +2301,14 @@ router.post("/voice", async (req, res) => {
 
             session.pendingSlot = slot;
             session.step = "BOOK_ASK_NAME";
+
+            logInfo("SLOT_SELECTED", {
+                callSid,
+                step: session.step,
+                selectedSlot: summarizeSlot(slot),
+                speech,
+                digits,
+            });
 
             promptAndGather(
                 vr,
@@ -2227,6 +2371,11 @@ router.post("/voice", async (req, res) => {
             }
 
             session.patientName = name;
+            logInfo("PATIENT_NAME_SET", {
+                callSid,
+                step: session.step,
+                patientName: session.patientName,
+            });
             session.phonePurpose = "BOOK";
             session.step = "BOOK_ASK_PHONE";
 
@@ -2322,6 +2471,12 @@ router.post("/voice", async (req, res) => {
             }
 
             if (detectAlternativeRequest(t)) {
+                logInfo("ALTERNATIVE_REQUEST_DETECTED", {
+                    callSid,
+                    step: session.step,
+                    speech,
+                    lastProposedStartISO: session.lastProposedStartISO || null,
+                });
                 if (session.lastProposedStartISO) {
                     return proposeSlotsFromRequestedDate({
                         vr,
