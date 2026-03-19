@@ -87,7 +87,7 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
         action: actionUrl,
         method: "POST",
         hints:
-            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
+            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, information, renseignements, adresse, horaires, horaire, ouverture, fermeture, ouvert, ferme, localisation, ou se trouve le cabinet, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3, 4",
         ...overrides,
     });
 }
@@ -351,6 +351,8 @@ function getGuidedFallbackPrompt(step) {
         case "CANCEL_CONFIRM_FOUND":
         case "CANCEL_ASK_REBOOK":
             return "Merci de répondre simplement par oui ou par non.";
+        case "INFO_HANDLE":
+            return "Vous pouvez dire l'adresse du cabinet ou les horaires d'ouverture.";
         default:
             return "Je n’ai pas bien compris. Merci de reformuler simplement.";
     }
@@ -1046,13 +1048,34 @@ function detectCancelIntent(text) {
     );
 }
 
+function detectInfoIntent(text) {
+    const t = normalizeText(text);
+    if (!t) return false;
+
+    return (
+        t.includes("information") ||
+        t.includes("renseignement") ||
+        t.includes("adresse") ||
+        t.includes("horaire") ||
+        t.includes("horaires") ||
+        t.includes("ouvert") ||
+        t.includes("ferme") ||
+        t.includes("ou se trouve") ||
+        t.includes("ou etes vous") ||
+        t.includes("localisation") ||
+        t.includes("venir")
+    );
+}
+
 function detectActionChoice(speech, digits) {
     const t = normalizeText(speech);
 
     if (digits === "1") return "BOOK";
     if (digits === "2") return "MODIFY";
     if (digits === "3") return "CANCEL";
+    if (digits === "4") return "INFO";
 
+    if (detectInfoIntent(t)) return "INFO";
     if (detectModifyIntent(t)) return "MODIFY";
     if (detectCancelIntent(t)) return "CANCEL";
     if (detectBookingIntent(t)) return "BOOK";
@@ -1063,7 +1086,7 @@ function detectActionChoice(speech, digits) {
 function getActionPrompt() {
     return (
         PHRASES.askAction ||
-        "Souhaitez-vous prendre, modifier ou annuler un rendez-vous ? Vous pouvez aussi taper 1 pour prendre, 2 pour modifier, 3 pour annuler."
+        "Souhaitez-vous prendre, modifier ou annuler un rendez-vous, ou obtenir une information ?"
     );
 }
 
@@ -1083,7 +1106,7 @@ function askActionMenu(vr, session, intro = "") {
     const gather = gatherSpeech(vr, "/twilio/voice", {
         numDigits: 1,
         hints:
-            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
+            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, information, renseignements, adresse, horaires, horaire, ouverture, fermeture, ouvert, ferme, localisation, ou se trouve le cabinet, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3, 4",
     });
 
     gather.say(SAY_OPTS, prompt);
@@ -1905,24 +1928,37 @@ router.post("/voice", async (req, res) => {
                 return sendTwiml(res, vr);
             }
 
+            if (actionChoice === "INFO") {
+                session.step = "INFO_HANDLE";
+
+                promptAndGather(
+                    vr,
+                    session,
+                    "Souhaitez-vous connaître l'adresse du cabinet ou les horaires d'ouverture ?",
+                    "Bien sûr."
+                );
+                return sendTwiml(res, vr);
+            }
+
             const retry = handleRetry(vr, res, session, callSid, "ACTION");
             if (retry) return retry;
 
             const gather = gatherSpeech(vr, "/twilio/voice", {
                 numDigits: 1,
                 hints:
-                    "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, premier, deuxieme, second, autre jour, autre horaire, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3",
+                    "prendre rendez-vous, prendre, rendez-vous, rdv, reserver, booker, modifier, changer, deplacer, reporter, annuler, supprimer, retirer, information, renseignement, adresse, horaires, horaire, ouvert, ferme, localisation, venir, 1, 2, 3, 4",
             });
 
             setPrompt(
                 session,
-                "Je n’ai pas bien compris. Dites prendre, modifier ou annuler. Vous pouvez aussi taper 1, 2 ou 3."
+                "Je n’ai pas bien compris. Dites prendre, modifier, annuler ou information. Vous pouvez aussi taper 1, 2, 3 ou 4."
             );
 
             sayFr(vr, "Je n’ai pas bien compris.");
+
             gather.say(
                 SAY_OPTS,
-                "Dites prendre, modifier ou annuler. Vous pouvez aussi taper 1 pour prendre, 2 pour modifier, 3 pour annuler."
+                "Dites prendre, modifier, annuler ou information. Vous pouvez aussi taper 1 pour prendre, 2 pour modifier, 3 pour annuler, 4 pour information."
             );
 
             return sendTwiml(res, vr);
@@ -3198,6 +3234,59 @@ router.post("/voice", async (req, res) => {
             session.actionAckOverride = "Très bien.";
             setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
+            return sendTwiml(res, vr);
+        }
+
+        if (session.step === "INFO_HANDLE") {
+            const t = normalizeText(speech);
+
+            const asksAddress =
+                t.includes("adresse") ||
+                t.includes("ou se situe") ||
+                t.includes("ou se trouve") ||
+                t.includes("ou etes vous") ||
+                t.includes("localisation");
+
+            const asksHours =
+                t.includes("horaire") ||
+                t.includes("horaires") ||
+                t.includes("heure d'ouverture") ||
+                t.includes("heure d ouverture") ||
+                t.includes("ouverture") ||
+                t.includes("fermeture") ||
+                t.includes("ouvert") ||
+                t.includes("ferme");
+
+            if (asksAddress) {
+                sayFr(
+                    vr,
+                    cabinet?.addressSpeech ||
+                    "Le cabinet se situe à l'adresse renseignée par le cabinet."
+                );
+                sayGoodbye(vr);
+                clearSession(callSid);
+                return sendTwiml(res, vr);
+            }
+
+            if (asksHours) {
+                sayFr(
+                    vr,
+                    cabinet?.hoursSpeech ||
+                    "Le cabinet est ouvert du lundi au vendredi de 8 heures à 12 heures et de 14 heures à 19 heures."
+                );
+                sayGoodbye(vr);
+                clearSession(callSid);
+                return sendTwiml(res, vr);
+            }
+
+            const retry = handleRetry(vr, res, session, callSid, "INFO_HANDLE");
+            if (retry) return retry;
+
+            promptAndGather(
+                vr,
+                session,
+                "Je n’ai pas bien compris. Vous pouvez dire l'adresse ou les horaires d'ouverture."
+            );
             return sendTwiml(res, vr);
         }
 

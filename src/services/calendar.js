@@ -1507,6 +1507,14 @@ async function suggestTwoSlotsFromDate({
     });
 
     const start = new Date(fromDate);
+    if (Number.isNaN(start.getTime())) {
+    return buildSuggestResponse({
+        status: "INVALID_FROM_DATE",
+        slots: [],
+        speech: "Je n'ai pas compris la date demandée.",
+        context: {},
+    });
+}
     const timeMax = new Date(start);
     timeMax.setDate(timeMax.getDate() + effectiveDays);
 
@@ -1538,6 +1546,19 @@ async function suggestTwoSlotsFromDate({
 
     const requestedDateKey = getDateKeyInTimezone(start, timezone);
     const dayAvailability = getCabinetDayAvailability(start, cabinet);
+
+    logInfo("SUGGEST_FROM_DATE_START", {
+    cabinetKey: cabinet?.key || null,
+    requestedDateKey,
+    timezone,
+    slotMinutes,
+    timePreference: timePreference?.key || timePreference || null,
+    targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
+    priorityPreference: priorityPreference || null,
+    openingRanges: dayAvailability.ranges || [],
+    isClosed: dayAvailability.isClosed,
+    closedReason: dayAvailability.reason || null,
+});
 
     if (dayAvailability.isClosed) {
         const speech = buildClosedSpeech({
