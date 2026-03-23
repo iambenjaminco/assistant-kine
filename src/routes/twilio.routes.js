@@ -109,6 +109,101 @@ function logError(event, data = {}) {
     console.error(`[TWILIO][${event}]`, data);
 }
 
+function maskName(name) {
+    const value = String(name || "").trim();
+    if (!value) return "";
+    if (value.length <= 2) return `${value[0] || ""}*`;
+    return `${value.slice(0, 2)}***`;
+}
+
+function buildSessionSnapshot(session) {
+    return {
+        step: session?.step || null,
+        patientName: maskName(session?.patientName || ""),
+        phone: maskPhone(session?.phone || ""),
+        phoneCandidate: maskPhone(session?.phoneCandidate || ""),
+        appointmentType: session?.appointmentType || null,
+        appointmentDurationMinutes: session?.appointmentDurationMinutes || null,
+        preferredPractitioner: session?.preferredPractitioner?.name || null,
+        practitionerPreferenceMode: session?.practitionerPreferenceMode || null,
+        wantsUsualPractitioner: session?.wantsUsualPractitioner ?? null,
+        preferredTimeWindow: session?.preferredTimeWindow || null,
+        preferredHourMinutes: Number.isFinite(session?.preferredHourMinutes)
+            ? session.preferredHourMinutes
+            : null,
+        priorityPreference: session?.priorityPreference || null,
+        requestedDateISO: session?.requestedDateISO || null,
+        lastProposedStartISO: session?.lastProposedStartISO || null,
+        lastIntentContext: session?.lastIntentContext || null,
+        slotsCount: Array.isArray(session?.slots) ? session.slots.length : 0,
+        pendingSlot: summarizeSlot(session?.pendingSlot),
+        foundEvent: session?.foundEvent
+            ? {
+                eventId: session.foundEvent.eventId || null,
+                calendarId: session.foundEvent.calendarId || null,
+                startISO: session.foundEvent.startISO || null,
+            }
+            : null,
+        retryCount: session?.retryCount || 0,
+        noInputCount: session?.noInputCount || 0,
+    };
+}
+
+function logStepTransition(callSid, session, from, to, meta = {}) {
+    logInfo("STEP_TRANSITION", {
+        callSid,
+        from: from || null,
+        to: to || null,
+        ...meta,
+        snapshot: buildSessionSnapshot(session),
+    });
+}
+
+function setStep(session, callSid, nextStep, meta = {}) {
+    const previousStep = session?.step || null;
+    session.step = nextStep;
+    logStepTransition(callSid, session, previousStep, nextStep, meta);
+}
+
+function logSessionCreated(callSid, session, meta = {}) {
+    logInfo("SESSION_CREATED", {
+        callSid,
+        ...meta,
+        snapshot: buildSessionSnapshot(session),
+    });
+}
+
+function logSessionCleared(callSid, session, reason = "UNKNOWN", meta = {}) {
+    logInfo("SESSION_CLEARED", {
+        callSid,
+        reason,
+        ...meta,
+        snapshot: buildSessionSnapshot(session),
+    });
+}
+
+function logCallOutcome(callSid, outcome, session, meta = {}) {
+    logInfo("CALL_OUTCOME", {
+        callSid,
+        outcome,
+        ...meta,
+        snapshot: buildSessionSnapshot(session),
+    });
+}
+
+function clearSessionWithLog(callSid, session, reason = "UNKNOWN", meta = {}) {
+    logSessionCleared(callSid, session, reason, meta);
+    clearSession(callSid);
+}
+
+function endCall(vr, res, callSid, session, reason, message = "", meta = {}) {
+    if (message) sayFr(vr, message);
+    logCallOutcome(callSid, reason, session, meta);
+    sayGoodbye(vr);
+    clearSessionWithLog(callSid, session, reason, meta);
+    return sendTwiml(res, vr);
+}
+
 function sendTwiml(res, vr) {
     const xml = vr.toString();
     console.log("[TWILIO][TWIML_XML]", xml);
@@ -252,7 +347,7 @@ function getCabinetDurations(cabinet) {
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
-        sessions.set(callSid, {
+        const session = {
             step: "ACTION",
             slots: [],
             patientName: "",
@@ -281,8 +376,12 @@ function getSession(callSid) {
             lastProposedStartISO: null,
             requestedDateISO: null,
             lastIntentContext: null,
-        });
+        };
+
+        sessions.set(callSid, session);
+        logSessionCreated(callSid, session);
     }
+
     return sessions.get(callSid);
 }
 
@@ -398,9 +497,20 @@ function handleRetry(vr, res, session, callSid, reason = "UNKNOWN") {
             step: session.step,
             reason,
         });
+
+        logCallOutcome(callSid, "CALL_ENDED_MISUNDERSTOOD", session, {
+            failedStep: session.step,
+            reason,
+            retryCount: session.retryCount,
+        });
+
         sayFr(vr, "Je n’arrive pas à comprendre votre réponse.");
         sayGoodbye(vr);
-        clearSession(callSid);
+        clearSessionWithLog(callSid, session, "CALL_ENDED_MISUNDERSTOOD", {
+            failedStep: session.step,
+            reason,
+            retryCount: session.retryCount,
+        });
         return sendTwiml(res, vr);
     }
 
@@ -1463,10 +1573,17 @@ async function proposeSlotsFromRequestedDate({
     });
 
     if (!session.slots.length) {
-        session.step =
+        setStep(
+            session,
+            callSid,
             session.lastIntentContext === "MODIFY"
                 ? "MODIFY_ASK_PREFERRED_DATE"
-                : "BOOK_ASK_PREFERRED_DATE";
+                : "BOOK_ASK_PREFERRED_DATE",
+            {
+                trigger: "NO_SLOT_FOUND_FOR_REQUESTED_DATE",
+                requestedDateISO,
+            }
+        );
 
         let introSpeech =
             filtered.hasTimeFilterMiss
@@ -1517,7 +1634,11 @@ async function proposeSlotsFromRequestedDate({
         saySlots(vr, session, session.slots);
     }
 
-    session.step = nextStep;
+    setStep(session, callSid, nextStep, {
+        trigger: "REQUESTED_DATE_SLOTS_PROPOSED",
+        requestedDateISO,
+        slotsCount: session.slots.length,
+    });
     promptAndGather(vr, session, getSlotSelectionPrompt(session));
     return sendTwiml(res, vr);
 }
@@ -1619,7 +1740,9 @@ async function proposeBookingSlots({
 
         sayFr(vr, msg);
 
-        session.step = "BOOK_ASK_PREFERRED_DATE";
+        setStep(session, callSid, "BOOK_ASK_PREFERRED_DATE", {
+            trigger: "NO_BOOKING_SLOT_FOUND",
+        });
         promptAndGather(vr, session, followUpPrompt);
         return sendTwiml(res, vr);
     }
@@ -1642,7 +1765,10 @@ async function proposeBookingSlots({
         saySlots(vr, session, session.slots);
     }
 
-    session.step = "BOOK_PICK_SLOT";
+    setStep(session, callSid, "BOOK_PICK_SLOT", {
+        trigger: "BOOKING_SLOTS_PROPOSED",
+        slotsCount: session.slots.length,
+    });
     promptAndGather(vr, session, getSlotSelectionPrompt(session));
     return sendTwiml(res, vr);
 }
@@ -1658,9 +1784,17 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
             phone: maskPhone(session.phone),
         });
 
+        logCallOutcome(callSid, "BOOKING_PENDING_SLOT_MISSING", session, {
+            patientName: maskName(session.patientName),
+            phone: maskPhone(session.phone),
+        });
+
         sayFr(vr, "Je ne retrouve plus le créneau sélectionné.");
         sayGoodbye(vr);
-        clearSession(callSid);
+        clearSessionWithLog(callSid, session, "BOOKING_PENDING_SLOT_MISSING", {
+            patientName: maskName(session.patientName),
+            phone: maskPhone(session.phone),
+        });
         return sendTwiml(res, vr);
     }
 
@@ -1698,11 +1832,15 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
     });
 
     if (result.ok) {
+        logCallOutcome(callSid, "BOOK_SUCCESS", session, {
+            eventId: result.event?.id || null,
+            slot: summarizeSlot(slot),
+        });
+
         sayFr(vr, PHRASES.confirmed || "C’est confirmé.");
         sayFr(
             vr,
-            `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
-            }.`
+            `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""}.`
         );
 
         try {
@@ -1730,7 +1868,10 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
         }
 
         sayGoodbye(vr);
-        clearSession(callSid);
+        clearSessionWithLog(callSid, session, "BOOK_SUCCESS", {
+            eventId: result.event?.id || null,
+            slot: summarizeSlot(slot),
+        });
         return sendTwiml(res, vr);
     }
 
@@ -1755,12 +1896,20 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
     rememberLastProposedSlots(session);
 
     if (!session.slots?.length) {
+        logCallOutcome(callSid, "BOOK_FAILED_NO_ALT_SLOT", session, {
+            code: result.code || null,
+            requestedSlot: summarizeSlot(slot),
+        });
+
         sayFr(
             vr,
             `${statusMsg} Je n’ai pas d’autre créneau disponible rapidement. Merci de rappeler le cabinet.`
         );
         sayGoodbye(vr);
-        clearSession(callSid);
+        clearSessionWithLog(callSid, session, "BOOK_FAILED_NO_ALT_SLOT", {
+            code: result.code || null,
+            requestedSlot: summarizeSlot(slot),
+        });
         return sendTwiml(res, vr);
     }
 
@@ -1768,7 +1917,10 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
     sayFr(vr, "Je peux vous proposer un autre créneau.");
     saySlots(vr, session, session.slots);
 
-    session.step = "BOOK_PICK_ALT";
+    setStep(session, callSid, "BOOK_PICK_ALT", {
+        trigger: "BOOKING_FAILED_ALT_PROPOSED",
+        slotsCount: session.slots.length,
+    });
     promptAndGather(vr, session, getSlotSelectionPrompt(session));
     return sendTwiml(res, vr);
 }
@@ -1838,9 +1990,17 @@ router.post("/voice", async (req, res) => {
             return sendTwiml(res, vr);
         }
 
+        logCallOutcome(callSid, "CALL_ENDED_NO_INPUT", session, {
+            step: session.step,
+            noInputCount: session.noInputCount,
+        });
+
         sayFr(vr, "Je n’ai pas eu de réponse.");
         sayGoodbye(vr);
-        clearSession(callSid);
+        clearSessionWithLog(callSid, session, "CALL_ENDED_NO_INPUT", {
+            step: session.step,
+            noInputCount: session.noInputCount,
+        });
         return sendTwiml(res, vr);
     }
 
@@ -1893,7 +2053,7 @@ router.post("/voice", async (req, res) => {
             if (actionChoice === "MODIFY") {
                 session.phonePurpose = "MODIFY";
                 session.lastIntentContext = "MODIFY";
-                session.step = "MODIFY_ASK_PHONE";
+                setStep(session, callSid, "MODIFY_ASK_PHONE", { trigger: "ACTION_MODIFY" });
 
                 promptAndGather(
                     vr,
@@ -1907,7 +2067,7 @@ router.post("/voice", async (req, res) => {
             if (actionChoice === "CANCEL") {
                 session.phonePurpose = "CANCEL";
                 session.lastIntentContext = "CANCEL";
-                session.step = "CANCEL_ASK_PHONE";
+                setStep(session, callSid, "CANCEL_ASK_PHONE", { trigger: "ACTION_CANCEL" });
 
                 promptAndGather(
                     vr,
@@ -1922,14 +2082,14 @@ router.post("/voice", async (req, res) => {
                 session.lastIntentContext = "BOOK";
                 session.initialBookingSpeech = speech || "";
                 session.actionAckOverride = "Très bien.";
-                session.step = "BOOK_WELCOME";
+                setStep(session, callSid, "BOOK_WELCOME", { trigger: "ACTION_BOOK" });
                 setPrompt(session, "");
                 vr.redirect({ method: "POST" }, "/twilio/voice");
                 return sendTwiml(res, vr);
             }
 
             if (actionChoice === "INFO") {
-                session.step = "INFO_HANDLE";
+                setStep(session, callSid, "INFO_HANDLE", { trigger: "ACTION_INFO" });
 
                 promptAndGather(
                     vr,
@@ -1996,7 +2156,9 @@ router.post("/voice", async (req, res) => {
             }
 
             if (!session.appointmentType) {
-                session.step = "BOOK_ASK_APPOINTMENT_TYPE";
+                setStep(session, callSid, "BOOK_ASK_APPOINTMENT_TYPE", {
+                    trigger: "APPOINTMENT_TYPE_MISSING",
+                });
                 promptAndGather(
                     vr,
                     session,
@@ -2007,13 +2169,17 @@ router.post("/voice", async (req, res) => {
             }
 
             if (!session.practitionerPreferenceMode) {
-                session.step = "BOOK_ASK_PRACTITIONER_PREF";
+                setStep(session, callSid, "BOOK_ASK_PRACTITIONER_PREF", {
+                    trigger: "APPOINTMENT_TYPE_READY",
+                });
                 promptAndGather(vr, session, getPractitionerPrompt(session), consumeActionAck(session));
                 return sendTwiml(res, vr);
             }
 
             if (session.practitionerPreferenceMode === "USUAL" && !session.preferredPractitioner) {
-                session.step = "BOOK_ASK_USUAL_PRACTITIONER";
+                setStep(session, callSid, "BOOK_ASK_USUAL_PRACTITIONER", {
+                    trigger: "USUAL_PRACTITIONER_REQUESTED",
+                });
                 promptAndGather(vr, session, "Avec quel kiné êtes-vous habituellement suivi ?", consumeActionAck(session));
                 return sendTwiml(res, vr);
             }
@@ -2048,7 +2214,10 @@ router.post("/voice", async (req, res) => {
                 speech,
             });
 
-            session.step = "BOOK_ASK_PRACTITIONER_PREF";
+            setStep(session, callSid, "BOOK_ASK_PRACTITIONER_PREF", {
+                trigger: "APPOINTMENT_TYPE_SET",
+                appointmentType: session.appointmentType,
+            });
             promptAndGather(
                 vr,
                 session,
@@ -2103,7 +2272,9 @@ router.post("/voice", async (req, res) => {
                     speech,
                 });
 
-                session.step = "BOOK_ASK_USUAL_PRACTITIONER";
+                setStep(session, callSid, "BOOK_ASK_USUAL_PRACTITIONER", {
+                    trigger: "PRACTITIONER_MODE_USUAL",
+                });
                 promptAndGather(vr, session, "Avec quel kiné êtes-vous habituellement suivi ?", "Très bien.");
                 return sendTwiml(res, vr);
             }
@@ -2118,7 +2289,9 @@ router.post("/voice", async (req, res) => {
                     speech,
                 });
 
-                session.step = "BOOK_ASK_SPECIFIC_PRACTITIONER_NAME";
+                setStep(session, callSid, "BOOK_ASK_SPECIFIC_PRACTITIONER_NAME", {
+                    trigger: "SPECIFIC_PRACTITIONER_NAME_REQUIRED",
+                });
                 promptAndGather(vr, session, "D'accord. Quel est le nom du kiné souhaité ?");
                 return sendTwiml(res, vr);
             }
@@ -2234,9 +2407,11 @@ router.post("/voice", async (req, res) => {
             if (wantsRepeat) {
                 const a = session.slots?.[0];
                 if (!a) {
+                    logCallOutcome(callSid, "BOOK_SLOTS_LOST", session);
+
                     sayFr(vr, "Je ne retrouve plus les créneaux proposés. Merci de rappeler le cabinet.");
                     sayGoodbye(vr);
-                    clearSession(callSid);
+                    clearSessionWithLog(callSid, session, "BOOK_SLOTS_LOST");
                     return sendTwiml(res, vr);
                 }
 
@@ -2291,7 +2466,9 @@ router.post("/voice", async (req, res) => {
                     });
                 }
 
-                session.step = "BOOK_ASK_PREFERRED_DATE";
+                setStep(session, callSid, "BOOK_ASK_PREFERRED_DATE", {
+                    trigger: "ALTERNATIVE_REQUEST_WITHOUT_LAST_PROPOSED_DATE",
+                });
                 promptAndGather(
                     vr,
                     session,
@@ -2307,7 +2484,7 @@ router.post("/voice", async (req, res) => {
                 const b = session.slots?.[1] || session.slots?.[0];
 
                 if (!a) {
-                    session.step = "BOOK_WELCOME";
+                    setStep(session, callSid, "BOOK_WELCOME", { trigger: "ACTION_BOOK" });
                     sayFr(vr, "On recommence.");
                     vr.redirect({ method: "POST" }, "/twilio/voice");
                     return sendTwiml(res, vr);
@@ -2330,13 +2507,16 @@ router.post("/voice", async (req, res) => {
 
             if (!slot || !slot.calendarId) {
                 sayFr(vr, "Ce créneau vient d’être pris. Je regarde d’autres disponibilités.");
-                session.step = "BOOK_WELCOME";
+                setStep(session, callSid, "BOOK_WELCOME", { trigger: "ACTION_BOOK" });
                 vr.redirect({ method: "POST" }, "/twilio/voice");
                 return sendTwiml(res, vr);
             }
 
             session.pendingSlot = slot;
-            session.step = "BOOK_ASK_NAME";
+            setStep(session, callSid, "BOOK_ASK_NAME", {
+                trigger: "SLOT_SELECTED",
+                selectedSlot: summarizeSlot(slot),
+            });
 
             logInfo("SLOT_SELECTED", {
                 callSid,
@@ -2413,7 +2593,10 @@ router.post("/voice", async (req, res) => {
                 patientName: session.patientName,
             });
             session.phonePurpose = "BOOK";
-            session.step = "BOOK_ASK_PHONE";
+            setStep(session, callSid, "BOOK_ASK_PHONE", {
+                trigger: "PATIENT_NAME_CAPTURED",
+                patientName: maskName(session.patientName),
+            });
 
             promptAndGather(
                 vr,
@@ -2440,7 +2623,10 @@ router.post("/voice", async (req, res) => {
             }
 
             session.phoneCandidate = phone;
-            session.step = "BOOK_CONFIRM_PHONE";
+            setStep(session, callSid, "BOOK_CONFIRM_PHONE", {
+                trigger: "PHONE_PARSED",
+                phone: maskPhone(phone),
+            });
 
             promptAndGather(vr, session, getPhoneConfirmPrompt(phone));
             return sendTwiml(res, vr);
@@ -2463,7 +2649,9 @@ router.post("/voice", async (req, res) => {
 
             if (!yesNo) {
                 session.phoneCandidate = "";
-                session.step = "BOOK_ASK_PHONE";
+                setStep(session, callSid, "BOOK_ASK_PHONE", {
+                    trigger: "PHONE_CONFIRMATION_REJECTED",
+                });
 
                 promptAndGather(
                     vr,
@@ -2527,7 +2715,9 @@ router.post("/voice", async (req, res) => {
                     });
                 }
 
-                session.step = "BOOK_ASK_PREFERRED_DATE";
+                setStep(session, callSid, "BOOK_ASK_PREFERRED_DATE", {
+                    trigger: "ALT_REQUEST_WITHOUT_LAST_PROPOSED_DATE",
+                });
                 promptAndGather(
                     vr,
                     session,
@@ -2552,12 +2742,35 @@ router.post("/voice", async (req, res) => {
 
             const slot = session.slots?.[choice];
 
+            logInfo("BOOK_ALT_SLOT_SELECTED", {
+                callSid,
+                choice,
+                speech,
+                digits,
+                selectedSlot: summarizeSlot(slot),
+            });
+
             if (!slot || !slot.calendarId) {
+                logCallOutcome(callSid, "BOOK_ALT_SLOT_INVALID", session, {
+                    choice,
+                    slotsAvailable: summarizeSlots(session.slots),
+                });
+
                 sayFr(vr, "Ce créneau n’est plus disponible pour le moment.");
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "BOOK_ALT_SLOT_INVALID", {
+                    choice,
+                    slotsAvailable: summarizeSlots(session.slots),
+                });
                 return sendTwiml(res, vr);
             }
+
+            logInfo("BOOK_ALT_ATTEMPT", {
+                callSid,
+                selectedSlot: summarizeSlot(slot),
+                patientName: maskName(session.patientName),
+                phone: maskPhone(session.phone),
+            });
 
             const result = await bookAppointmentSafe({
                 calendarId: slot.calendarId,
@@ -2574,12 +2787,24 @@ router.post("/voice", async (req, res) => {
                 cabinet,
             });
 
+            logInfo("BOOK_ALT_RESULT", {
+                callSid,
+                ok: result.ok,
+                code: result.code || null,
+                eventId: result.event?.id || null,
+                selectedSlot: summarizeSlot(slot),
+            });
+
             if (result.ok) {
+                logCallOutcome(callSid, "BOOK_ALT_SUCCESS", session, {
+                    eventId: result.event?.id || null,
+                    slot: summarizeSlot(slot),
+                });
+
                 sayFr(vr, PHRASES.confirmed || "C’est confirmé.");
                 sayFr(
                     vr,
-                    `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
-                    }.`
+                    `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""}.`
                 );
 
                 try {
@@ -2607,16 +2832,27 @@ router.post("/voice", async (req, res) => {
                 }
 
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "BOOK_ALT_SUCCESS", {
+                    eventId: result.event?.id || null,
+                    slot: summarizeSlot(slot),
+                });
                 return sendTwiml(res, vr);
             }
+
+            logCallOutcome(callSid, "BOOK_ALT_FAILED", session, {
+                code: result.code || null,
+                slot: summarizeSlot(slot),
+            });
 
             sayFr(
                 vr,
                 "Désolé, je n’arrive pas à confirmer un rendez-vous pour le moment. Merci de rappeler le cabinet."
             );
             sayGoodbye(vr);
-            clearSession(callSid);
+            clearSessionWithLog(callSid, session, "BOOK_ALT_FAILED", {
+                code: result.code || null,
+                slot: summarizeSlot(slot),
+            });
             return sendTwiml(res, vr);
         }
 
@@ -2636,7 +2872,10 @@ router.post("/voice", async (req, res) => {
             }
 
             session.phoneCandidate = phone;
-            session.step = "MODIFY_CONFIRM_PHONE";
+            setStep(session, callSid, "MODIFY_CONFIRM_PHONE", {
+                trigger: "PHONE_PARSED",
+                phone: maskPhone(phone),
+            });
 
             promptAndGather(vr, session, getPhoneConfirmPrompt(phone));
             return sendTwiml(res, vr);
@@ -2659,7 +2898,7 @@ router.post("/voice", async (req, res) => {
 
             if (!yesNo) {
                 session.phoneCandidate = "";
-                session.step = "MODIFY_ASK_PHONE";
+                setStep(session, callSid, "MODIFY_ASK_PHONE", { trigger: "ACTION_MODIFY" });
 
                 promptAndGather(
                     vr,
@@ -2671,7 +2910,10 @@ router.post("/voice", async (req, res) => {
 
             session.phone = session.phoneCandidate;
             session.phoneCandidate = "";
-            session.step = "MODIFY_FIND_APPT";
+            setStep(session, callSid, "MODIFY_FIND_APPT", {
+                trigger: "PHONE_CONFIRMED",
+                phone: maskPhone(session.phone),
+            });
             session.lastIntentContext = "MODIFY";
             setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
@@ -2684,6 +2926,20 @@ router.post("/voice", async (req, res) => {
                 phone: session.phone,
             });
 
+            logInfo("MODIFY_FIND_APPOINTMENT_RESULT", {
+                callSid,
+                phone: maskPhone(session.phone),
+                found: Boolean(found),
+                appointment: found
+                    ? {
+                        eventId: found.eventId || null,
+                        calendarId: found.calendarId || null,
+                        startISO: found.startISO || null,
+                        patientName: maskName(found.patientName || ""),
+                    }
+                    : null,
+            });
+
             if (!found) {
                 sayFr(
                     vr,
@@ -2691,7 +2947,7 @@ router.post("/voice", async (req, res) => {
                 );
                 session.phone = "";
                 session.foundEvent = null;
-                session.step = "MODIFY_ASK_PHONE";
+                setStep(session, callSid, "MODIFY_ASK_PHONE", { trigger: "ACTION_MODIFY" });
                 promptAndGather(vr, session, "Quel est votre numéro de téléphone ?");
                 return sendTwiml(res, vr);
             }
@@ -2707,7 +2963,10 @@ router.post("/voice", async (req, res) => {
                 session.practitionerPreferenceMode = "SPECIFIC";
             }
 
-            session.step = "MODIFY_CONFIRM_FOUND";
+            setStep(session, callSid, "MODIFY_CONFIRM_FOUND", {
+                trigger: "MODIFY_APPOINTMENT_FOUND",
+                foundEventId: found.eventId || null,
+            });
 
             sayFr(vr, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
             promptAndGather(vr, session, "Est-ce bien votre rendez-vous ?");
@@ -2716,6 +2975,13 @@ router.post("/voice", async (req, res) => {
 
         if (session.step === "MODIFY_CONFIRM_FOUND") {
             const yesNo = parseYesNo(speech);
+
+            logInfo("MODIFY_CONFIRM_FOUND_RESPONSE", {
+                callSid,
+                speech,
+                parsedYesNo: yesNo,
+                foundEventId: session.foundEvent?.eventId || null,
+            });
 
             if (yesNo === null) {
                 const retry = handleRetry(vr, res, session, callSid, "MODIFY_CONFIRM_FOUND");
@@ -2732,7 +2998,7 @@ router.post("/voice", async (req, res) => {
             if (!yesNo) {
                 session.phone = "";
                 session.foundEvent = null;
-                session.step = "MODIFY_ASK_PHONE";
+                setStep(session, callSid, "MODIFY_ASK_PHONE", { trigger: "ACTION_MODIFY" });
                 promptAndGather(
                     vr,
                     session,
@@ -2744,16 +3010,38 @@ router.post("/voice", async (req, res) => {
 
             const found = session.foundEvent;
             if (!found) {
+                logCallOutcome(callSid, "MODIFY_FOUND_EVENT_LOST", session);
+
                 sayFr(vr, "Je ne retrouve plus votre rendez-vous.");
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "MODIFY_FOUND_EVENT_LOST");
                 return sendTwiml(res, vr);
             }
 
             if (isLessThan24h(found.startISO)) {
+                logWarn("MODIFY_BLOCKED_LESS_THAN_24H", {
+                    callSid,
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                    startISO: found.startISO,
+                });
+
                 await addCallbackNoteToEvent({
                     calendarId: found.calendarId,
                     eventId: found.eventId,
+                });
+
+                logInfo("CALLBACK_NOTE_ADDED", {
+                    callSid,
+                    reason: "MODIFY_LESS_THAN_24H",
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                });
+
+                logCallOutcome(callSid, "MODIFY_BLOCKED_LESS_THAN_24H", session, {
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                    startISO: found.startISO,
                 });
 
                 sayFr(
@@ -2762,26 +3050,55 @@ router.post("/voice", async (req, res) => {
                 );
 
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "MODIFY_BLOCKED_LESS_THAN_24H", {
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                    startISO: found.startISO,
+                });
                 return sendTwiml(res, vr);
             }
+
+            logInfo("MODIFY_CANCEL_OLD_APPOINTMENT_ATTEMPT", {
+                callSid,
+                eventId: found.eventId,
+                calendarId: found.calendarId,
+                startISO: found.startISO,
+            });
 
             const cancelResult = await cancelAppointmentSafe({
                 calendarId: found.calendarId,
                 eventId: found.eventId,
             });
 
+            logInfo("MODIFY_CANCEL_OLD_APPOINTMENT_RESULT", {
+                callSid,
+                ok: cancelResult.ok,
+                eventId: found.eventId,
+                calendarId: found.calendarId,
+            });
+
             if (!cancelResult.ok) {
+                logCallOutcome(callSid, "MODIFY_CANCEL_OLD_APPOINTMENT_FAILED", session, {
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                });
+
                 sayFr(
                     vr,
                     "Je n’arrive pas à modifier le rendez-vous pour le moment. Merci de rappeler le cabinet."
                 );
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "MODIFY_CANCEL_OLD_APPOINTMENT_FAILED", {
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                });
                 return sendTwiml(res, vr);
             }
 
-            session.step = "MODIFY_PROPOSE_NEW";
+            setStep(session, callSid, "MODIFY_PROPOSE_NEW", {
+                trigger: "MODIFY_OLD_APPOINTMENT_CANCELLED",
+                previousEventId: found.eventId || null,
+            });
             setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
             return sendTwiml(res, vr);
@@ -2810,12 +3127,20 @@ router.post("/voice", async (req, res) => {
             rememberLastProposedSlots(session);
 
             if (!session.slots.length) {
+                logCallOutcome(callSid, "MODIFY_NO_NEW_SLOT_AFTER_CANCEL", session, {
+                    oldEventId: session.foundEvent?.eventId || null,
+                    oldStartISO: session.foundEvent?.startISO || null,
+                });
+
                 sayFr(
                     vr,
                     "J’ai bien annulé votre rendez-vous, mais je n’ai pas de nouveau créneau disponible. Merci d’appeler le cabinet."
                 );
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "MODIFY_NO_NEW_SLOT_AFTER_CANCEL", {
+                    oldEventId: session.foundEvent?.eventId || null,
+                    oldStartISO: session.foundEvent?.startISO || null,
+                });
                 return sendTwiml(res, vr);
             }
 
@@ -2833,7 +3158,10 @@ router.post("/voice", async (req, res) => {
                 saySlots(vr, session, session.slots);
             }
 
-            session.step = "MODIFY_PICK_NEW";
+            setStep(session, callSid, "MODIFY_PICK_NEW", {
+                trigger: "NEW_SLOTS_PROPOSED",
+                slotsCount: session.slots.length,
+            });
             promptAndGather(vr, session, getSlotSelectionPrompt(session));
             return sendTwiml(res, vr);
         }
@@ -2861,7 +3189,9 @@ router.post("/voice", async (req, res) => {
                 session.slots = [];
                 session.pendingSlot = null;
                 session.requestedDateISO = null;
-                session.step = "MODIFY_PROPOSE_NEW";
+                setStep(session, callSid, "MODIFY_PROPOSE_NEW", {
+                    trigger: "PREFERENCE_REFINEMENT_REQUESTED",
+                });
                 setPrompt(session, "");
                 vr.redirect({ method: "POST" }, "/twilio/voice");
                 return sendTwiml(res, vr);
@@ -2882,7 +3212,9 @@ router.post("/voice", async (req, res) => {
                     });
                 }
 
-                session.step = "MODIFY_ASK_PREFERRED_DATE";
+                setStep(session, callSid, "MODIFY_ASK_PREFERRED_DATE", {
+                    trigger: "ALTERNATIVE_REQUEST_WITHOUT_LAST_PROPOSED_DATE",
+                });
                 promptAndGather(
                     vr,
                     session,
@@ -2907,12 +3239,52 @@ router.post("/voice", async (req, res) => {
 
             const slot = session.slots?.[choice];
 
+            logInfo("MODIFY_NEW_SLOT_SELECTED", {
+                callSid,
+                choice,
+                speech,
+                digits,
+                selectedSlot: summarizeSlot(slot),
+                oldEventId: session.foundEvent?.eventId || null,
+                oldStartISO: session.foundEvent?.startISO || null,
+            });
+
             if (!slot || !slot.calendarId) {
+                logWarn("MODIFY_NEW_SLOT_INVALID", {
+                    callSid,
+                    choice,
+                    speech,
+                    digits,
+                    slotsAvailable: summarizeSlots(session.slots),
+                    oldEventId: session.foundEvent?.eventId || null,
+                });
+
+                logCallOutcome(callSid, "MODIFY_NEW_SLOT_INVALID", session, {
+                    choice,
+                    speech,
+                    digits,
+                });
+
                 sayFr(vr, "Ce créneau n’est plus disponible pour le moment.");
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "MODIFY_NEW_SLOT_INVALID", {
+                    choice,
+                    speech,
+                    digits,
+                });
                 return sendTwiml(res, vr);
             }
+
+            logInfo("MODIFY_BOOK_NEW_ATTEMPT", {
+                callSid,
+                patientName: maskName(session.patientName),
+                phone: maskPhone(session.phone),
+                selectedSlot: summarizeSlot(slot),
+                oldEventId: session.foundEvent?.eventId || null,
+                oldStartISO: session.foundEvent?.startISO || null,
+                appointmentType: session.appointmentType || null,
+                appointmentDurationMinutes: session.appointmentDurationMinutes || null,
+            });
 
             const result = await bookAppointmentSafe({
                 calendarId: slot.calendarId,
@@ -2929,12 +3301,27 @@ router.post("/voice", async (req, res) => {
                 cabinet,
             });
 
+            logInfo("MODIFY_BOOK_NEW_RESULT", {
+                callSid,
+                ok: result.ok,
+                code: result.code || null,
+                eventId: result.event?.id || null,
+                selectedSlot: summarizeSlot(slot),
+                oldEventId: session.foundEvent?.eventId || null,
+            });
+
             if (result.ok) {
+                logCallOutcome(callSid, "MODIFY_SUCCESS", session, {
+                    oldEventId: session.foundEvent?.eventId || null,
+                    oldStartISO: session.foundEvent?.startISO || null,
+                    newEventId: result.event?.id || null,
+                    newSlot: summarizeSlot(slot),
+                });
+
                 sayFr(vr, "C’est modifié et confirmé.");
                 sayFr(
                     vr,
-                    `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""
-                    }.`
+                    `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""}.`
                 );
 
                 try {
@@ -2962,16 +3349,31 @@ router.post("/voice", async (req, res) => {
                 }
 
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "MODIFY_SUCCESS", {
+                    oldEventId: session.foundEvent?.eventId || null,
+                    newEventId: result.event?.id || null,
+                    newSlot: summarizeSlot(slot),
+                });
                 return sendTwiml(res, vr);
             }
+
+            logCallOutcome(callSid, "MODIFY_REBOOK_FAILED", session, {
+                oldEventId: session.foundEvent?.eventId || null,
+                oldStartISO: session.foundEvent?.startISO || null,
+                selectedSlot: summarizeSlot(slot),
+                resultCode: result.code || null,
+            });
 
             sayFr(
                 vr,
                 "Désolé, je n’arrive pas à confirmer ce nouveau créneau. Merci de rappeler le cabinet."
             );
             sayGoodbye(vr);
-            clearSession(callSid);
+            clearSessionWithLog(callSid, session, "MODIFY_REBOOK_FAILED", {
+                oldEventId: session.foundEvent?.eventId || null,
+                selectedSlot: summarizeSlot(slot),
+                resultCode: result.code || null,
+            });
             return sendTwiml(res, vr);
         }
 
@@ -2982,7 +3384,9 @@ router.post("/voice", async (req, res) => {
                 session.slots = [];
                 session.pendingSlot = null;
                 session.requestedDateISO = null;
-                session.step = "MODIFY_PROPOSE_NEW";
+                setStep(session, callSid, "MODIFY_PROPOSE_NEW", {
+                    trigger: "PREFERENCE_REFINEMENT_REQUESTED",
+                });
                 setPrompt(session, "");
                 vr.redirect({ method: "POST" }, "/twilio/voice");
                 return sendTwiml(res, vr);
@@ -3029,7 +3433,10 @@ router.post("/voice", async (req, res) => {
             }
 
             session.phoneCandidate = phone;
-            session.step = "CANCEL_CONFIRM_PHONE";
+            setStep(session, callSid, "CANCEL_CONFIRM_PHONE", {
+                trigger: "PHONE_PARSED",
+                phone: maskPhone(phone),
+            });
 
             promptAndGather(vr, session, getPhoneConfirmPrompt(phone));
             return sendTwiml(res, vr);
@@ -3052,7 +3459,7 @@ router.post("/voice", async (req, res) => {
 
             if (!yesNo) {
                 session.phoneCandidate = "";
-                session.step = "CANCEL_ASK_PHONE";
+                setStep(session, callSid, "CANCEL_ASK_PHONE", { trigger: "ACTION_CANCEL" });
 
                 promptAndGather(
                     vr,
@@ -3064,7 +3471,10 @@ router.post("/voice", async (req, res) => {
 
             session.phone = session.phoneCandidate;
             session.phoneCandidate = "";
-            session.step = "CANCEL_FIND_APPT";
+            setStep(session, callSid, "CANCEL_FIND_APPT", {
+                trigger: "PHONE_CONFIRMED",
+                phone: maskPhone(session.phone),
+            });
             setPrompt(session, "");
             vr.redirect({ method: "POST" }, "/twilio/voice");
             return sendTwiml(res, vr);
@@ -3076,6 +3486,20 @@ router.post("/voice", async (req, res) => {
                 phone: session.phone,
             });
 
+            logInfo("CANCEL_FIND_APPOINTMENT_RESULT", {
+                callSid,
+                phone: maskPhone(session.phone),
+                found: Boolean(found),
+                appointment: found
+                    ? {
+                        eventId: found.eventId || null,
+                        calendarId: found.calendarId || null,
+                        startISO: found.startISO || null,
+                        patientName: maskName(found.patientName || ""),
+                    }
+                    : null,
+            });
+
             if (!found) {
                 sayFr(
                     vr,
@@ -3083,14 +3507,17 @@ router.post("/voice", async (req, res) => {
                 );
                 session.phone = "";
                 session.foundEvent = null;
-                session.step = "CANCEL_ASK_PHONE";
+                setStep(session, callSid, "CANCEL_ASK_PHONE", { trigger: "ACTION_CANCEL" });
                 promptAndGather(vr, session, "Quel est votre numéro de téléphone ?");
                 return sendTwiml(res, vr);
             }
 
             session.foundEvent = found;
             session.patientName = found.patientName || session.patientName || "Patient";
-            session.step = "CANCEL_CONFIRM_FOUND";
+            setStep(session, callSid, "CANCEL_CONFIRM_FOUND", {
+                trigger: "CANCEL_APPOINTMENT_FOUND",
+                foundEventId: found.eventId || null,
+            });
 
             sayFr(vr, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
             promptAndGather(vr, session, "Est-ce bien votre rendez-vous ?");
@@ -3099,6 +3526,13 @@ router.post("/voice", async (req, res) => {
 
         if (session.step === "CANCEL_CONFIRM_FOUND") {
             const yesNo = parseYesNo(speech);
+
+            logInfo("CANCEL_CONFIRM_FOUND_RESPONSE", {
+                callSid,
+                speech,
+                parsedYesNo: yesNo,
+                foundEventId: session.foundEvent?.eventId || null,
+            });
 
             if (yesNo === null) {
                 const retry = handleRetry(vr, res, session, callSid, "CANCEL_CONFIRM_FOUND");
@@ -3115,7 +3549,7 @@ router.post("/voice", async (req, res) => {
             if (!yesNo) {
                 session.phone = "";
                 session.foundEvent = null;
-                session.step = "CANCEL_ASK_PHONE";
+                setStep(session, callSid, "CANCEL_ASK_PHONE", { trigger: "ACTION_CANCEL" });
                 promptAndGather(
                     vr,
                     session,
@@ -3127,16 +3561,36 @@ router.post("/voice", async (req, res) => {
 
             const found = session.foundEvent;
             if (!found) {
+                logCallOutcome(callSid, "CANCEL_FOUND_EVENT_LOST", session);
+
                 sayFr(vr, "Je ne retrouve plus votre rendez-vous.");
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "CANCEL_FOUND_EVENT_LOST");
                 return sendTwiml(res, vr);
             }
 
             if (isLessThan24h(found.startISO)) {
+                logWarn("CANCEL_BLOCKED_LESS_THAN_24H", {
+                    callSid,
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                    startISO: found.startISO,
+                });
                 await addCallbackNoteToEvent({
                     calendarId: found.calendarId,
                     eventId: found.eventId,
+                });
+
+                logInfo("CALLBACK_NOTE_ADDED", {
+                    callSid,
+                    reason: "CANCEL_LESS_THAN_24H",
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                });
+
+                logCallOutcome(callSid, "CANCEL_BLOCKED_LESS_THAN_24H", session, {
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
                 });
 
                 sayFr(
@@ -3145,22 +3599,46 @@ router.post("/voice", async (req, res) => {
                 );
 
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "CANCEL_BLOCKED_LESS_THAN_24H", {
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                });
                 return sendTwiml(res, vr);
             }
 
+            logInfo("CANCEL_APPOINTMENT_ATTEMPT", {
+                callSid,
+                eventId: found.eventId,
+                calendarId: found.calendarId,
+                startISO: found.startISO,
+            });
             const cancelResult = await cancelAppointmentSafe({
                 calendarId: found.calendarId,
                 eventId: found.eventId,
             });
 
+            logInfo("CANCEL_APPOINTMENT_RESULT", {
+                callSid,
+                ok: cancelResult.ok,
+                eventId: found.eventId,
+                calendarId: found.calendarId,
+            });
+
             if (!cancelResult.ok) {
+                logCallOutcome(callSid, "CANCEL_FAILED", session, {
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                });
+
                 sayFr(
                     vr,
                     "Je n’arrive pas à annuler le rendez-vous pour le moment. Merci de rappeler le cabinet."
                 );
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "CANCEL_FAILED", {
+                    eventId: found.eventId,
+                    calendarId: found.calendarId,
+                });
                 return sendTwiml(res, vr);
             }
 
@@ -3186,11 +3664,19 @@ router.post("/voice", async (req, res) => {
                     message: smsErr?.message,
                 });
             }
+            logCallOutcome(callSid, "CANCEL_SUCCESS", session, {
+                cancelledEventId: found.eventId,
+                cancelledStartISO: found.startISO,
+            });
 
-            session.step = "CANCEL_ASK_REBOOK";
+            setStep(session, callSid, "CANCEL_ASK_REBOOK", {
+                trigger: "CANCEL_SUCCESS",
+                cancelledEventId: found.eventId || null,
+            });
             sayFr(vr, "Votre rendez-vous est annulé.");
             promptAndGather(vr, session, "Voulez-vous reprendre un rendez-vous ?");
             return sendTwiml(res, vr);
+
         }
 
         if (session.step === "CANCEL_ASK_REBOOK") {
@@ -3219,13 +3705,15 @@ router.post("/voice", async (req, res) => {
             }
 
             if (yesNo === false) {
+                logCallOutcome(callSid, "CANCEL_COMPLETED_NO_REBOOK", session);
+
                 sayAck(vr, session, "confirm");
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "CANCEL_COMPLETED_NO_REBOOK");
                 return sendTwiml(res, vr);
             }
 
-            session.step = "BOOK_WELCOME";
+            setStep(session, callSid, "BOOK_WELCOME", { trigger: "ACTION_BOOK" });
             session.lastIntentContext = "BOOK";
             session.initialBookingSpeech = speech || "";
             session.pendingSlot = null;
@@ -3263,8 +3751,9 @@ router.post("/voice", async (req, res) => {
                     cabinet?.addressSpeech ||
                     "Le cabinet se situe à l'adresse renseignée par le cabinet."
                 );
+                logCallOutcome(callSid, "INFO_ADDRESS_GIVEN", session);
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "INFO_ADDRESS_GIVEN");
                 return sendTwiml(res, vr);
             }
 
@@ -3274,8 +3763,9 @@ router.post("/voice", async (req, res) => {
                     cabinet?.hoursSpeech ||
                     "Le cabinet est ouvert du lundi au vendredi de 8 heures à 12 heures et de 14 heures à 19 heures."
                 );
+                logCallOutcome(callSid, "INFO_HOURS_GIVEN", session);
                 sayGoodbye(vr);
-                clearSession(callSid);
+                clearSessionWithLog(callSid, session, "INFO_HOURS_GIVEN");
                 return sendTwiml(res, vr);
             }
 
@@ -3314,12 +3804,19 @@ router.post("/voice", async (req, res) => {
             patientName: session.patientName || "",
         });
 
+        logCallOutcome(callSid, "UNEXPECTED_ERROR", session, {
+            errorMessage: err?.message,
+            step: session.step,
+        });
+
         sayFr(
             vr,
             PHRASES.errorGeneric || "Une erreur est survenue. Veuillez réessayer plus tard."
         );
         sayGoodbye(vr);
-        clearSession(callSid);
+        clearSessionWithLog(callSid, session, "UNEXPECTED_ERROR", {
+            errorMessage: err?.message,
+        });
         return sendTwiml(res, vr);
     }
 });
