@@ -280,17 +280,27 @@ function resolveSlotMinutes({
     appointmentType,
     cabinet,
 }) {
-    const n = Number(durationMinutes);
-    if (Number.isFinite(n) && n > 0) return n;
+    const explicitDuration = Number(durationMinutes);
+    if (Number.isFinite(explicitDuration) && explicitDuration > 0) {
+        return explicitDuration;
+    }
+
+    const first = Number(
+        cabinet?.appointmentDurations?.first ??
+        cabinet?.scheduling?.appointmentDurations?.first
+    );
+
+    const followUp = Number(
+        cabinet?.appointmentDurations?.followUp ??
+        cabinet?.scheduling?.appointmentDurations?.followUp
+    );
 
     if (appointmentType === "FIRST") {
-        const first = Number(cabinet?.scheduling?.appointmentDurations?.first);
         return Number.isFinite(first) && first > 0
             ? first
             : DEFAULT_FIRST_APPOINTMENT_MINUTES;
     }
 
-    const followUp = Number(cabinet?.scheduling?.appointmentDurations?.followUp);
     return Number.isFinite(followUp) && followUp > 0
         ? followUp
         : DEFAULT_SLOT_MINUTES;
@@ -1425,6 +1435,15 @@ async function suggestTwoSlotsNext7Days({
         cabinet,
     });
 
+    logInfo("RESOLVED_SLOT_MINUTES", {
+    durationMinutes,
+    appointmentType,
+    cabinetKey: cabinet?.key || null,
+    cabinetAppointmentDurations: cabinet?.appointmentDurations || null,
+    cabinetSchedulingAppointmentDurations: cabinet?.scheduling?.appointmentDurations || null,
+    resolvedSlotMinutes: slotMinutes,
+});
+
     const now = new Date();
     const timeMin = new Date(now);
     const timeMax = new Date(now);
@@ -1537,6 +1556,15 @@ async function suggestTwoSlotsFromDate({
         appointmentType,
         cabinet,
     });
+
+    logInfo("RESOLVED_SLOT_MINUTES", {
+    durationMinutes,
+    appointmentType,
+    cabinetKey: cabinet?.key || null,
+    cabinetAppointmentDurations: cabinet?.appointmentDurations || null,
+    cabinetSchedulingAppointmentDurations: cabinet?.scheduling?.appointmentDurations || null,
+    resolvedSlotMinutes: slotMinutes,
+});
 
     const start = new Date(fromDate);
     if (Number.isNaN(start.getTime())) {

@@ -336,8 +336,15 @@ function getCabinetOrFail(vr) {
 }
 
 function getCabinetDurations(cabinet) {
-    const first = Number(cabinet?.appointmentDurations?.first);
-    const followUp = Number(cabinet?.appointmentDurations?.followUp);
+    const first = Number(
+        cabinet?.appointmentDurations?.first ??
+        cabinet?.scheduling?.appointmentDurations?.first
+    );
+
+    const followUp = Number(
+        cabinet?.appointmentDurations?.followUp ??
+        cabinet?.scheduling?.appointmentDurations?.followUp
+    );
 
     return {
         first: Number.isFinite(first) && first > 0 ? first : 45,
