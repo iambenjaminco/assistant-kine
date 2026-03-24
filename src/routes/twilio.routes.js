@@ -389,7 +389,13 @@ function clearSession(callSid) {
     sessions.delete(callSid);
 }
 
-function resetToMenu(session) {
+function resetToMenu(session, callSid = "UNKNOWN", reason = "MANUAL_RESET") {
+    logWarn("RESET_TO_MENU", {
+        callSid,
+        reason,
+        snapshotBeforeReset: buildSessionSnapshot(session),
+    });
+
     session.step = "ACTION";
     session.slots = [];
     session.patientName = "";
@@ -2012,6 +2018,20 @@ router.post("/voice", async (req, res) => {
     }
 
     if (hasInput && wantsMainMenu(normalizedSpeech) && session.step !== "ACTION") {
+        resetToMenu(session, callSid, "USER_REQUESTED_MAIN_MENU");
+        askActionMenu(
+            vr,
+            session,
+            pickVariant(session, "menu_back", [
+                "D'accord, retour au menu principal.",
+                "Très bien, je reviens au menu principal.",
+                "Entendu, on repart du début.",
+            ])
+        );
+        return sendTwiml(res, vr);
+    }
+
+    if (!hasInput && session.step !== "ACTION" && session.lastPrompt) {
         session.noInputCount = (session.noInputCount || 0) + 1;
 
         logWarn("NO_INPUT_DETECTED", {
