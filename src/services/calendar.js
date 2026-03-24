@@ -256,22 +256,22 @@ function getTimeZoneForCabinet(cabinet) {
 }
 
 function getCabinetSlotStep(cabinet) {
-    const n = Number(cabinet?.slotStepMinutes);
+    const n = Number(cabinet?.scheduling?.slotStepMinutes);
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_SLOT_MINUTES;
 }
 
 function getCabinetMinLeadMinutes(cabinet) {
-    const n = Number(cabinet?.minLeadMinutes);
+    const n = Number(cabinet?.scheduling?.minLeadMinutes);
     return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MIN_LEAD_MINUTES;
 }
 
 function getCabinetLookaheadDays(cabinet) {
-    const n = Number(cabinet?.lookaheadDays);
+    const n = Number(cabinet?.scheduling?.lookaheadDays);
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_LOOKAHEAD_DAYS;
 }
 
 function getCabinetMaxSuggestions(cabinet) {
-    const n = Number(cabinet?.maxSuggestions);
+    const n = Number(cabinet?.scheduling?.maxSuggestions);
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_SUGGESTIONS;
 }
 
@@ -284,13 +284,13 @@ function resolveSlotMinutes({
     if (Number.isFinite(n) && n > 0) return n;
 
     if (appointmentType === "FIRST") {
-        const first = Number(cabinet?.appointmentDurations?.first);
+        const first = Number(cabinet?.scheduling?.appointmentDurations?.first);
         return Number.isFinite(first) && first > 0
             ? first
             : DEFAULT_FIRST_APPOINTMENT_MINUTES;
     }
 
-    const followUp = Number(cabinet?.appointmentDurations?.followUp);
+    const followUp = Number(cabinet?.scheduling?.appointmentDurations?.followUp);
     return Number.isFinite(followUp) && followUp > 0
         ? followUp
         : DEFAULT_SLOT_MINUTES;
@@ -942,16 +942,19 @@ function selectAvailableSlots({
     return prioritized.slice(0, maxSuggestions);
 }
 
-function generateCandidateSlots({
+function generateDynamicCandidateSlots({
     startDate,
     days,
     slotMinutes,
     cabinet,
+    busyByCal,
+    practitioners,
 }) {
-    const slots = [];
-    const day0 = new Date(startDate);
     const timezone = getTimeZoneForCabinet(cabinet);
-    const stepMinutes = getCabinetSlotStep(cabinet);
+    const allCandidates = [];
+    const seen = new Set();
+
+    const day0 = new Date(startDate);
 
     for (let i = 0; i < days; i++) {
         const day = new Date(day0);
@@ -961,30 +964,57 @@ function generateCandidateSlots({
         if (availability.isClosed || !availability.ranges.length) continue;
 
         for (const range of availability.ranges) {
-            let cursor = dateAtTime(day, range.start, timezone);
-            const end = dateAtTime(day, range.end, timezone);
+            const rangeStart = dateAtTime(day, range.start, timezone);
+            const rangeEnd = dateAtTime(day, range.end, timezone);
 
-            while (cursor < end) {
-                const slotStart = new Date(cursor);
-                const slotEnd = new Date(cursor);
-                slotEnd.setMinutes(slotEnd.getMinutes() + slotMinutes);
+            const candidateStarts = [new Date(rangeStart)];
 
-                const startMinutes = getMinutesInTimezone(slotStart, timezone);
+            for (const practitioner of practitioners) {
+                const busy = busyByCal[practitioner.calendarId] || [];
+
+                for (const b of busy) {
+                    const busyEnd = new Date(b.end);
+
+                    if (busyEnd > rangeStart && busyEnd < rangeEnd) {
+                        candidateStarts.push(new Date(busyEnd));
+                    }
+                }
+            }
+
+            candidateStarts.sort((a, b) => a.getTime() - b.getTime());
+
+            for (const candidateStart of candidateStarts) {
+                const candidateEnd = new Date(candidateStart);
+                candidateEnd.setMinutes(candidateEnd.getMinutes() + slotMinutes);
+
+                const startMinutes = getMinutesInTimezone(candidateStart, timezone);
                 const endMinutes = startMinutes + slotMinutes;
 
                 if (
-                    slotEnd <= end &&
-                    isWithinRangesByMinutes(startMinutes, endMinutes, availability.ranges)
+                    candidateStart >= rangeStart &&
+                    candidateEnd <= rangeEnd &&
+                    isWithinRangesByMinutes(
+                        startMinutes,
+                        endMinutes,
+                        availability.ranges
+                    )
                 ) {
-                    slots.push({ start: slotStart, end: slotEnd });
+                    const key = `${candidateStart.toISOString()}|${candidateEnd.toISOString()}`;
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        allCandidates.push({
+                            start: candidateStart,
+                            end: candidateEnd,
+                        });
+                    }
                 }
-
-                cursor.setMinutes(cursor.getMinutes() + stepMinutes);
             }
         }
     }
 
-    return slots;
+    return allCandidates.sort(
+        (a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()
+    );
 }
 
 function extractPatientNameFromEvent(ev) {
@@ -1414,11 +1444,13 @@ async function suggestTwoSlotsNext7Days({
     );
 
     const busyByCal = Object.fromEntries(busyEntries);
-    const candidates = generateCandidateSlots({
+    const candidates = generateDynamicCandidateSlots({
         startDate: now,
         days: effectiveDays,
         slotMinutes,
         cabinet,
+        busyByCal,
+        practitioners,
     });
 
     const cutoff = buildCutoff(now, effectiveMinLeadMinutes);
@@ -1508,13 +1540,13 @@ async function suggestTwoSlotsFromDate({
 
     const start = new Date(fromDate);
     if (Number.isNaN(start.getTime())) {
-    return buildSuggestResponse({
-        status: "INVALID_FROM_DATE",
-        slots: [],
-        speech: "Je n'ai pas compris la date demandée.",
-        context: {},
-    });
-}
+        return buildSuggestResponse({
+            status: "INVALID_FROM_DATE",
+            slots: [],
+            speech: "Je n'ai pas compris la date demandée.",
+            context: {},
+        });
+    }
     const timeMax = new Date(start);
     timeMax.setDate(timeMax.getDate() + effectiveDays);
 
@@ -1533,11 +1565,13 @@ async function suggestTwoSlotsFromDate({
 
     const busyByCal = Object.fromEntries(busyEntries);
 
-    const candidates = generateCandidateSlots({
+    const candidates = generateDynamicCandidateSlots({
         startDate: start,
         days: effectiveDays,
         slotMinutes,
         cabinet,
+        busyByCal,
+        practitioners,
     });
 
     const now = new Date();
@@ -1548,17 +1582,17 @@ async function suggestTwoSlotsFromDate({
     const dayAvailability = getCabinetDayAvailability(start, cabinet);
 
     logInfo("SUGGEST_FROM_DATE_START", {
-    cabinetKey: cabinet?.key || null,
-    requestedDateKey,
-    timezone,
-    slotMinutes,
-    timePreference: timePreference?.key || timePreference || null,
-    targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
-    priorityPreference: priorityPreference || null,
-    openingRanges: dayAvailability.ranges || [],
-    isClosed: dayAvailability.isClosed,
-    closedReason: dayAvailability.reason || null,
-});
+        cabinetKey: cabinet?.key || null,
+        requestedDateKey,
+        timezone,
+        slotMinutes,
+        timePreference: timePreference?.key || timePreference || null,
+        targetHourMinutes: Number.isFinite(targetHourMinutes) ? targetHourMinutes : null,
+        priorityPreference: priorityPreference || null,
+        openingRanges: dayAvailability.ranges || [],
+        isClosed: dayAvailability.isClosed,
+        closedReason: dayAvailability.reason || null,
+    });
 
     if (dayAvailability.isClosed) {
         const speech = buildClosedSpeech({
