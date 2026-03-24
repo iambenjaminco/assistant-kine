@@ -1117,6 +1117,31 @@ function parseYesNo(text) {
     return null;
 }
 
+function isPhoneConfirmationStep(step) {
+    return (
+        step === "BOOK_CONFIRM_PHONE" ||
+        step === "MODIFY_CONFIRM_PHONE" ||
+        step === "CANCEL_CONFIRM_PHONE"
+    );
+}
+
+function detectExplicitPhoneRejection(text) {
+    const t = normalizeText(text);
+    if (!t) return false;
+
+    return (
+        t === "non" ||
+        t.includes("pas le bon") ||
+        t.includes("c'est pas le bon") ||
+        t.includes("ce n'est pas le bon") ||
+        t.includes("mauvais numero") ||
+        t.includes("ce n'est pas mon numero") ||
+        t.includes("c'est pas mon numero") ||
+        t.includes("numero faux") ||
+        t.includes("faux numero")
+    );
+}
+
 function detectBookingIntent(text) {
     const t = normalizeText(text);
     if (!t) return false;
@@ -1961,21 +1986,32 @@ router.post("/voice", async (req, res) => {
     const hasInput = Boolean(speech || digits);
     const normalizedSpeech = normalizeText(speech);
 
-    if (hasInput && wantsMainMenu(normalizedSpeech) && session.step !== "ACTION") {
-        resetToMenu(session);
-        askActionMenu(
+    if (hasInput && isPhoneConfirmationStep(session.step) && detectExplicitPhoneRejection(speech)) {
+        session.phoneCandidate = "";
+
+        if (session.step === "BOOK_CONFIRM_PHONE") {
+            setStep(session, callSid, "BOOK_ASK_PHONE", {
+                trigger: "PHONE_CONFIRMATION_REJECTED_GUARD",
+            });
+        } else if (session.step === "MODIFY_CONFIRM_PHONE") {
+            setStep(session, callSid, "MODIFY_ASK_PHONE", {
+                trigger: "PHONE_CONFIRMATION_REJECTED_GUARD",
+            });
+        } else if (session.step === "CANCEL_CONFIRM_PHONE") {
+            setStep(session, callSid, "CANCEL_ASK_PHONE", {
+                trigger: "PHONE_CONFIRMATION_REJECTED_GUARD",
+            });
+        }
+
+        promptAndGather(
             vr,
             session,
-            pickVariant(session, "menu_back", [
-                "D'accord, retour au menu principal.",
-                "Très bien, je reviens au menu principal.",
-                "Entendu, on repart du début.",
-            ])
+            "D'accord. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
         );
         return sendTwiml(res, vr);
     }
 
-    if (!hasInput && session.step !== "ACTION" && session.lastPrompt) {
+    if (hasInput && wantsMainMenu(normalizedSpeech) && session.step !== "ACTION") {
         session.noInputCount = (session.noInputCount || 0) + 1;
 
         logWarn("NO_INPUT_DETECTED", {
@@ -2633,6 +2669,15 @@ router.post("/voice", async (req, res) => {
         }
 
         if (session.step === "BOOK_CONFIRM_PHONE") {
+            logInfo("PHONE_CONFIRM_RESPONSE", {
+                callSid,
+                step: session.step,
+                speech,
+                digits,
+                parsedYesNo: parseYesNo(speech),
+                phoneCandidate: maskPhone(session.phoneCandidate),
+            });
+
             const yesNo = parseYesNo(speech);
 
             if (yesNo === null) {
@@ -2882,6 +2927,15 @@ router.post("/voice", async (req, res) => {
         }
 
         if (session.step === "MODIFY_CONFIRM_PHONE") {
+            logInfo("PHONE_CONFIRM_RESPONSE", {
+                callSid,
+                step: session.step,
+                speech,
+                digits,
+                parsedYesNo: parseYesNo(speech),
+                phoneCandidate: maskPhone(session.phoneCandidate),
+            });
+
             const yesNo = parseYesNo(speech);
 
             if (yesNo === null) {
@@ -3443,6 +3497,15 @@ router.post("/voice", async (req, res) => {
         }
 
         if (session.step === "CANCEL_CONFIRM_PHONE") {
+            logInfo("PHONE_CONFIRM_RESPONSE", {
+                callSid,
+                step: session.step,
+                speech,
+                digits,
+                parsedYesNo: parseYesNo(speech),
+                phoneCandidate: maskPhone(session.phoneCandidate),
+            });
+
             const yesNo = parseYesNo(speech);
 
             if (yesNo === null) {
