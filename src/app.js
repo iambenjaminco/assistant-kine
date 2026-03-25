@@ -3,6 +3,7 @@
 const express = require("express");
 const calendarRoutes = require("./routes/calendar.routes");
 const twilioRoutes = require("./routes/twilio.routes");
+const stripeRoutes = require("./routes/stripe.routes");
 
 const app = express();
 
@@ -24,17 +25,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// Middlewares
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
-
-// Route santé serveur
+// Santé serveur
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+// ⚠️ Stripe webhook AVANT les parseurs globaux
+app.use("/stripe/webhook", express.raw({ type: "application/json" }));
+
+// Middlewares globaux
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+
 // Routes principales
 app.use("/api/calendar", calendarRoutes);
 app.use("/twilio", twilioRoutes);
+app.use("/stripe", stripeRoutes);
 
 module.exports = app;
