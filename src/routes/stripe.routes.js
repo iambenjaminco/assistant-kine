@@ -103,10 +103,14 @@ router.post("/webhook", (req, res) => {
 
         if (cabinetId) {
           const updated = upsertCabinet(cabinetId, {
-            email: session.metadata?.customerEmail || session.customer_email || null,
+            email:
+              session.metadata?.customerEmail ||
+              session.customer_email ||
+              null,
             status: "active",
             stripeCustomerId: session.customer || null,
             stripeSubscriptionId: session.subscription || null,
+            stripeSubscriptionStatus: "active",
             lastCheckoutSessionId: session.id,
           });
 
@@ -126,18 +130,24 @@ router.post("/webhook", (req, res) => {
           ? findCabinetBySubscriptionId(invoice.subscription)
           : null;
 
-        const foundByCustomer = !foundBySubscription && invoice.customer
-          ? findCabinetByCustomerId(invoice.customer)
-          : null;
+        const foundByCustomer =
+          !foundBySubscription && invoice.customer
+            ? findCabinetByCustomerId(invoice.customer)
+            : null;
 
         const found = foundBySubscription || foundByCustomer;
 
         if (found) {
           const updated = upsertCabinet(found.cabinetId, {
             status: "active",
-            stripeCustomerId: invoice.customer || found.cabinet.stripeCustomerId || null,
+            stripeCustomerId:
+              invoice.customer || found.cabinet.stripeCustomerId || null,
             stripeSubscriptionId:
-              invoice.subscription || found.cabinet.stripeSubscriptionId || null,
+              invoice.subscription ||
+              found.cabinet.stripeSubscriptionId ||
+              null,
+            stripeSubscriptionStatus:
+              found.cabinet.stripeSubscriptionStatus || "active",
             lastPaidInvoiceId: invoice.id,
           });
 
@@ -163,9 +173,10 @@ router.post("/webhook", (req, res) => {
           ? findCabinetBySubscriptionId(invoice.subscription)
           : null;
 
-        const foundByCustomer = !foundBySubscription && invoice.customer
-          ? findCabinetByCustomerId(invoice.customer)
-          : null;
+        const foundByCustomer =
+          !foundBySubscription && invoice.customer
+            ? findCabinetByCustomerId(invoice.customer)
+            : null;
 
         const found = foundBySubscription || foundByCustomer;
 
@@ -191,7 +202,8 @@ router.post("/webhook", (req, res) => {
 
         if (found) {
           const updated = upsertCabinet(found.cabinetId, {
-            status: "inactive",
+            status: "canceled",
+            stripeSubscriptionStatus: "canceled",
           });
 
           console.log("⛔ Abonnement supprimé, cabinet désactivé", {
@@ -203,7 +215,7 @@ router.post("/webhook", (req, res) => {
         break;
       }
 
-            case "customer.subscription.updated": {
+      case "customer.subscription.updated": {
         const subscription = event.data.object;
 
         const found = findCabinetBySubscriptionId(subscription.id);
@@ -211,7 +223,10 @@ router.post("/webhook", (req, res) => {
         if (found) {
           let nextStatus = found.cabinet.status;
 
-          if (subscription.status === "active" || subscription.status === "trialing") {
+          if (
+            subscription.status === "active" ||
+            subscription.status === "trialing"
+          ) {
             nextStatus = "active";
           } else if (
             subscription.status === "past_due" ||
@@ -252,8 +267,9 @@ router.get("/success", (req, res) => {
   res.send(`
     <html>
       <body style="font-family: Arial, sans-serif; padding: 40px;">
-        <h1>Paiement Stripe réussi ✅</h1>
-        <p>Votre abonnement a bien été pris en compte.</p>
+        <h1>Abonnement activé ✅</h1>
+        <p>Votre paiement a bien été confirmé.</p>
+        <p>Votre cabinet est maintenant activé.</p>
         <p>Vous pouvez fermer cette page.</p>
       </body>
     </html>
