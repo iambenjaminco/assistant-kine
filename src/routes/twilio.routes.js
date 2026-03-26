@@ -12,6 +12,7 @@ const {
     addCallbackNoteToEvent,
 } = require("../services/calendar");
 
+const { getCabinet: getCabinetBilling } = require("../services/cabinetsStore");
 const {
     sendAppointmentConfirmationSMS,
     sendAppointmentModifiedSMS,
@@ -1964,6 +1965,26 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
 }
 
 router.post("/voice", async (req, res) => {
+    const cabinetId = "cabinet_test_001"; // TEMPORAIRE : plus tard on fera numéro Twilio -> cabinetId
+
+    const billingCabinet = getCabinetBilling(cabinetId);
+
+    if (!billingCabinet || billingCabinet.status !== "active") {
+        logWarn("CABINET_SUBSCRIPTION_INACTIVE", {
+            callSid: safeCallSid(req),
+            cabinetId,
+            billingStatus: billingCabinet?.status || null,
+        });
+
+        const blockedVr = new twilio.twiml.VoiceResponse();
+        sayFr(
+            blockedVr,
+            "Votre abonnement n'est pas actif. Merci de contacter le cabinet."
+        );
+        blockedVr.hangup();
+
+        return sendTwiml(res, blockedVr);
+    }
     const VoiceResponse = twilio.twiml.VoiceResponse;
     const vr = new VoiceResponse();
 

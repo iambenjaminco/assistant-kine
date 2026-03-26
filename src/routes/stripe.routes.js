@@ -1,5 +1,10 @@
 const express = require("express");
 const Stripe = require("stripe");
+const {
+  upsertCabinet,
+  findCabinetByCustomerId,
+  findCabinetBySubscriptionId,
+} = require("../services/cabinetsStore");
 
 const router = express.Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -8,7 +13,6 @@ function getBaseUrl(req) {
   return process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
 }
 
-// Crée une session Stripe Checkout pour un abonnement mensuel
 router.post("/create-checkout-session", async (req, res) => {
   try {
     const { cabinetId, email } = req.body;
@@ -26,6 +30,11 @@ router.post("/create-checkout-session", async (req, res) => {
         .status(500)
         .json({ error: "STRIPE_PRICE_MONTHLY_ID manquant" });
     }
+
+    upsertCabinet(cabinetId, {
+      email,
+      status: "pending_payment",
+    });
 
     const baseUrl = getBaseUrl(req);
 
@@ -56,7 +65,6 @@ router.post("/create-checkout-session", async (req, res) => {
       cabinetId,
       email,
       sessionId: session.id,
-      url: session.url,
     });
 
     return res.json({
@@ -71,7 +79,6 @@ router.post("/create-checkout-session", async (req, res) => {
   }
 });
 
-// Webhook Stripe
 router.post("/webhook", (req, res) => {
   const sig = req.headers["stripe-signature"];
 
@@ -92,14 +99,22 @@ router.post("/webhook", (req, res) => {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object;
+        const cabinetId = session.metadata?.cabinetId;
 
-        console.log("✅ Checkout terminé", {
-          sessionId: session.id,
-          customerId: session.customer,
-          subscriptionId: session.subscription,
-          cabinetId: session.metadata?.cabinetId || null,
-          email: session.metadata?.customerEmail || session.customer_email || null,
-        });
+        if (cabinetId) {
+          const updated = upsertCabinet(cabinetId, {
+            email: session.metadata?.customerEmail || session.customer_email || null,
+            status: "active",
+            stripeCustomerId: session.customer || null,
+            stripeSubscriptionId: session.subscription || null,
+            lastCheckoutSessionId: session.id,
+          });
+
+          console.log("✅ Cabinet activé après checkout", {
+            cabinetId,
+            cabinet: updated,
+          });
+        }
 
         break;
       }
@@ -107,11 +122,36 @@ router.post("/webhook", (req, res) => {
       case "invoice.paid": {
         const invoice = event.data.object;
 
-        console.log("✅ Paiement réussi", {
-          invoiceId: invoice.id,
-          customerId: invoice.customer,
-          subscriptionId: invoice.subscription,
-        });
+        const foundBySubscription = invoice.subscription
+          ? findCabinetBySubscriptionId(invoice.subscription)
+          : null;
+
+        const foundByCustomer = !foundBySubscription && invoice.customer
+          ? findCabinetByCustomerId(invoice.customer)
+          : null;
+
+        const found = foundBySubscription || foundByCustomer;
+
+        if (found) {
+          const updated = upsertCabinet(found.cabinetId, {
+            status: "active",
+            stripeCustomerId: invoice.customer || found.cabinet.stripeCustomerId || null,
+            stripeSubscriptionId:
+              invoice.subscription || found.cabinet.stripeSubscriptionId || null,
+            lastPaidInvoiceId: invoice.id,
+          });
+
+          console.log("✅ Paiement réussi, cabinet confirmé actif", {
+            cabinetId: found.cabinetId,
+            cabinet: updated,
+          });
+        } else {
+          console.log("ℹ️ Paiement reçu mais cabinet introuvable", {
+            invoiceId: invoice.id,
+            customerId: invoice.customer,
+            subscriptionId: invoice.subscription,
+          });
+        }
 
         break;
       }
@@ -119,11 +159,27 @@ router.post("/webhook", (req, res) => {
       case "invoice.payment_failed": {
         const invoice = event.data.object;
 
-        console.log("❌ Paiement échoué", {
-          invoiceId: invoice.id,
-          customerId: invoice.customer,
-          subscriptionId: invoice.subscription,
-        });
+        const foundBySubscription = invoice.subscription
+          ? findCabinetBySubscriptionId(invoice.subscription)
+          : null;
+
+        const foundByCustomer = !foundBySubscription && invoice.customer
+          ? findCabinetByCustomerId(invoice.customer)
+          : null;
+
+        const found = foundBySubscription || foundByCustomer;
+
+        if (found) {
+          const updated = upsertCabinet(found.cabinetId, {
+            status: "inactive",
+            lastFailedInvoiceId: invoice.id,
+          });
+
+          console.log("❌ Paiement échoué, cabinet désactivé", {
+            cabinetId: found.cabinetId,
+            cabinet: updated,
+          });
+        }
 
         break;
       }
@@ -131,11 +187,52 @@ router.post("/webhook", (req, res) => {
       case "customer.subscription.deleted": {
         const subscription = event.data.object;
 
-        console.log("⛔ Abonnement supprimé", {
-          subscriptionId: subscription.id,
-          customerId: subscription.customer,
-          cabinetId: subscription.metadata?.cabinetId || null,
-        });
+        const found = findCabinetBySubscriptionId(subscription.id);
+
+        if (found) {
+          const updated = upsertCabinet(found.cabinetId, {
+            status: "inactive",
+          });
+
+          console.log("⛔ Abonnement supprimé, cabinet désactivé", {
+            cabinetId: found.cabinetId,
+            cabinet: updated,
+          });
+        }
+
+        break;
+      }
+
+            case "customer.subscription.updated": {
+        const subscription = event.data.object;
+
+        const found = findCabinetBySubscriptionId(subscription.id);
+
+        if (found) {
+          let nextStatus = found.cabinet.status;
+
+          if (subscription.status === "active" || subscription.status === "trialing") {
+            nextStatus = "active";
+          } else if (
+            subscription.status === "past_due" ||
+            subscription.status === "unpaid" ||
+            subscription.status === "canceled" ||
+            subscription.status === "incomplete_expired"
+          ) {
+            nextStatus = "inactive";
+          }
+
+          const updated = upsertCabinet(found.cabinetId, {
+            status: nextStatus,
+            stripeSubscriptionStatus: subscription.status,
+          });
+
+          console.log("ℹ️ Abonnement mis à jour", {
+            cabinetId: found.cabinetId,
+            cabinet: updated,
+            stripeStatus: subscription.status,
+          });
+        }
 
         break;
       }
@@ -151,13 +248,27 @@ router.post("/webhook", (req, res) => {
   }
 });
 
-// Pages simples de retour pour test
 router.get("/success", (req, res) => {
-  res.send("Paiement Stripe réussi ✅");
+  res.send(`
+    <html>
+      <body style="font-family: Arial, sans-serif; padding: 40px;">
+        <h1>Paiement Stripe réussi ✅</h1>
+        <p>Votre abonnement a bien été pris en compte.</p>
+        <p>Vous pouvez fermer cette page.</p>
+      </body>
+    </html>
+  `);
 });
 
 router.get("/cancel", (req, res) => {
-  res.send("Paiement Stripe annulé.");
+  res.send(`
+    <html>
+      <body style="font-family: Arial, sans-serif; padding: 40px;">
+        <h1>Paiement annulé</h1>
+        <p>Votre abonnement n'a pas été finalisé.</p>
+      </body>
+    </html>
+  `);
 });
 
 module.exports = router;
