@@ -1969,7 +1969,7 @@ router.post("/voice", async (req, res) => {
 
     const billingCabinet = getCabinetBilling(cabinetId);
 
-    if (!billingCabinet || billingCabinet.status !== "active") {
+    if (true) {
         logWarn("CABINET_SUBSCRIPTION_INACTIVE", {
             callSid: safeCallSid(req),
             cabinetId,
