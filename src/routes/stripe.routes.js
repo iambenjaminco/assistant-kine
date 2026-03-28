@@ -266,10 +266,15 @@ router.post("/webhook", (req, res) => {
 router.get("/success", (req, res) => {
   res.send(`
     <html>
-      <body style="font-family: Arial, sans-serif; padding: 40px;">
+      <head>
+        <title>Abonnement activé</title>
+      </head>
+      <body style="font-family: Arial, sans-serif; padding: 40px; max-width: 720px; margin: auto; line-height: 1.6; color: #111;">
         <h1>Abonnement activé ✅</h1>
         <p>Votre paiement a bien été confirmé.</p>
         <p>Votre cabinet est maintenant activé.</p>
+        <p>La prochaine étape consiste à finaliser la configuration de votre assistant téléphonique.</p>
+        <p>Nous vous recontacterons très prochainement pour la mise en place.</p>
         <p>Vous pouvez fermer cette page.</p>
       </body>
     </html>
@@ -279,9 +284,13 @@ router.get("/success", (req, res) => {
 router.get("/cancel", (req, res) => {
   res.send(`
     <html>
-      <body style="font-family: Arial, sans-serif; padding: 40px;">
+      <head>
+        <title>Paiement annulé</title>
+      </head>
+      <body style="font-family: Arial, sans-serif; padding: 40px; max-width: 720px; margin: auto; line-height: 1.6; color: #111;">
         <h1>Paiement annulé</h1>
         <p>Votre abonnement n'a pas été finalisé.</p>
+        <p>Vous pourrez reprendre le paiement lorsque vous le souhaitez.</p>
       </body>
     </html>
   `);
