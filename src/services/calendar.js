@@ -1,7 +1,6 @@
 // src/services/calendar.js
 const { google } = require("googleapis");
 const { getAuth } = require("../config/googleAuth");
-const { CABINETS, getDefaultCabinet } = require("../config/cabinets");
 
 const DEFAULT_TIMEZONE = "Europe/Paris";
 const DEFAULT_SLOT_MINUTES = 30;
@@ -306,21 +305,9 @@ function resolveSlotMinutes({
         : DEFAULT_SLOT_MINUTES;
 }
 
-function getCabinetForPractitioners(practitioners = []) {
-    const first = practitioners[0];
-    const cabinetKey = first?.cabinetKey;
-
-    if (cabinetKey && CABINETS[cabinetKey]) {
-        return CABINETS[cabinetKey];
-    }
-
-    return getDefaultCabinet();
-}
-
 function getCalendarClientCachedMeta(practitioners = [], cabinet = null) {
-    const effectiveCabinet = cabinet || getCabinetForPractitioners(practitioners);
-    const timezone = getTimeZoneForCabinet(effectiveCabinet);
-    return { cabinet: effectiveCabinet, timezone };
+    const timezone = getTimeZoneForCabinet(cabinet);
+    return { cabinet, timezone };
 }
 
 function getDatePartsInTimezone(dateOrIso, timezone) {
@@ -1231,7 +1218,8 @@ function formatSlotFR(dateOrIso, timezone = DEFAULT_TIMEZONE) {
 }
 
 async function createAppointment({
-    calendarId = "primary",
+
+    calendarId,
     patientName,
     reason = "Rendez-vous kiné",
     startDate,
@@ -1241,6 +1229,9 @@ async function createAppointment({
     durationMinutes,
     cabinet,
 }) {
+    if (!calendarId) {
+        throw new Error("calendarId requis");
+    }
     const calendar = await getCalendarClient();
     const timezone = getTimeZoneForCabinet(cabinet);
 
@@ -1292,11 +1283,14 @@ async function createAppointment({
 }
 
 async function isSlotAvailable({
-    calendarId = "primary",
+    calendarId,
     startDate,
     endDate,
     cabinet,
 }) {
+    if (!calendarId) {
+        throw new Error("calendarId requis");
+    }
     const calendar = await getCalendarClient();
     const timezone = getTimeZoneForCabinet(cabinet);
 
@@ -1321,7 +1315,7 @@ async function isSlotAvailable({
 }
 
 async function bookAppointmentSafe({
-    calendarId = "primary",
+    calendarId,
     patientName,
     reason,
     startDate,
@@ -1331,7 +1325,14 @@ async function bookAppointmentSafe({
     durationMinutes,
     cabinet = null,
 }) {
-    const effectiveCabinet = cabinet || getDefaultCabinet();
+    if (!calendarId) {
+        throw new Error("calendarId requis");
+    }
+    if (!cabinet) {
+        throw new Error("cabinet requis");
+    }
+
+    const effectiveCabinet = cabinet;
     const start = new Date(startDate);
     let end = new Date(endDate);
 
@@ -1402,6 +1403,7 @@ function getSameDaySlots(slots, dateKey, timezone) {
 }
 
 async function suggestTwoSlotsNext7Days({
+    cabinet,
     practitioners,
     days,
     durationMinutes,
@@ -1414,7 +1416,7 @@ async function suggestTwoSlotsNext7Days({
 }) {
     assertPractitioners(practitioners);
 
-    const { cabinet, timezone } = getCalendarClientCachedMeta(practitioners);
+    const { timezone } = getCalendarClientCachedMeta(practitioners, cabinet);
     const calendar = await getCalendarClient();
 
     const effectiveDays = Number.isFinite(Number(days))
@@ -1436,13 +1438,13 @@ async function suggestTwoSlotsNext7Days({
     });
 
     logInfo("RESOLVED_SLOT_MINUTES", {
-    durationMinutes,
-    appointmentType,
-    cabinetKey: cabinet?.key || null,
-    cabinetAppointmentDurations: cabinet?.appointmentDurations || null,
-    cabinetSchedulingAppointmentDurations: cabinet?.scheduling?.appointmentDurations || null,
-    resolvedSlotMinutes: slotMinutes,
-});
+        durationMinutes,
+        appointmentType,
+        cabinetKey: cabinet?.key || null,
+        cabinetAppointmentDurations: cabinet?.appointmentDurations || null,
+        cabinetSchedulingAppointmentDurations: cabinet?.scheduling?.appointmentDurations || null,
+        resolvedSlotMinutes: slotMinutes,
+    });
 
     const now = new Date();
     const timeMin = new Date(now);
@@ -1523,6 +1525,7 @@ async function suggestTwoSlotsNext7Days({
 }
 
 async function suggestTwoSlotsFromDate({
+    cabinet,
     practitioners,
     fromDate,
     days,
@@ -1536,7 +1539,7 @@ async function suggestTwoSlotsFromDate({
 }) {
     assertPractitioners(practitioners);
 
-    const { cabinet, timezone } = getCalendarClientCachedMeta(practitioners);
+    const { timezone } = getCalendarClientCachedMeta(practitioners, cabinet);
     const calendar = await getCalendarClient();
 
     const effectiveDays = Number.isFinite(Number(days))
@@ -1558,13 +1561,13 @@ async function suggestTwoSlotsFromDate({
     });
 
     logInfo("RESOLVED_SLOT_MINUTES", {
-    durationMinutes,
-    appointmentType,
-    cabinetKey: cabinet?.key || null,
-    cabinetAppointmentDurations: cabinet?.appointmentDurations || null,
-    cabinetSchedulingAppointmentDurations: cabinet?.scheduling?.appointmentDurations || null,
-    resolvedSlotMinutes: slotMinutes,
-});
+        durationMinutes,
+        appointmentType,
+        cabinetKey: cabinet?.key || null,
+        cabinetAppointmentDurations: cabinet?.appointmentDurations || null,
+        cabinetSchedulingAppointmentDurations: cabinet?.scheduling?.appointmentDurations || null,
+        resolvedSlotMinutes: slotMinutes,
+    });
 
     const start = new Date(fromDate);
     if (Number.isNaN(start.getTime())) {
@@ -1855,10 +1858,10 @@ async function suggestTwoSlotsFromDate({
     });
 }
 
-async function findNextAppointmentSafe({ practitioners, patientName, phone }) {
+async function findNextAppointmentSafe({ cabinet, practitioners, patientName, phone }) {
     assertPractitioners(practitioners);
 
-    const { cabinet, timezone } = getCalendarClientCachedMeta(practitioners);
+    const { timezone } = getCalendarClientCachedMeta(practitioners, cabinet);
     const calendar = await getCalendarClient();
     const phoneNorm = normalizePhone(phone);
 

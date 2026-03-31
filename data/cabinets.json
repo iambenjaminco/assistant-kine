@@ -1,5 +1,19 @@
 {
   "cabinet_test_001": {
-    "status": "active"
+    "status": "active",
+    "name": "Cabinet Kiné Test",
+    "twilioPhoneNumber": "+33412058252",
+    "smsPhoneNumber": "+33939242663",
+    "timezone": "Europe/Paris",
+    "practitioners": [
+      {
+        "name": "Benjamin",
+        "calendarId": "benjamin.vhk@gmail.com"
+      },
+      {
+        "name": "Lisa",
+        "calendarId": "assistantkine.support@gmail.com"
+      }
+    ]
   }
 }

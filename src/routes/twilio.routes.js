@@ -12,6 +12,11 @@ const {
     addCallbackNoteToEvent,
 } = require("../services/calendar");
 
+const {
+    incrementMetric,
+    addCallDuration,
+} = require("../services/analytics");
+
 const { getCabinet: getCabinetBilling } = require("../services/cabinetsStore");
 const {
     sendAppointmentConfirmationSMS,
@@ -397,6 +402,57 @@ function clearSession(callSid) {
     sessions.delete(callSid);
 }
 
+function ensureTracking(session) {
+    if (!session.tracking) {
+        session.tracking = {
+            callReceivedTracked: false,
+            callHandledTracked: false,
+            failedCallTracked: false,
+            durationTracked: false,
+            startedAt: Date.now(),
+        };
+    }
+}
+
+function trackCallReceived(session, cabinetKey = "main") {
+    ensureTracking(session);
+
+    if (session.tracking.callReceivedTracked) return;
+
+    incrementMetric(cabinetKey, "callsReceived");
+    session.tracking.callReceivedTracked = true;
+}
+
+function trackCallHandled(session, cabinetKey = "main") {
+    ensureTracking(session);
+
+    if (session.tracking.callHandledTracked) return;
+
+    incrementMetric(cabinetKey, "callsHandled");
+    session.tracking.callHandledTracked = true;
+}
+
+function trackFailedCall(session, cabinetKey = "main") {
+    ensureTracking(session);
+
+    if (session.tracking.failedCallTracked) return;
+
+    incrementMetric(cabinetKey, "failedCalls");
+    session.tracking.failedCallTracked = true;
+}
+
+function trackCallDuration(session, cabinetKey = "main") {
+    ensureTracking(session);
+
+    if (session.tracking.durationTracked) return;
+
+    const startedAt = Number(session.tracking.startedAt || Date.now());
+    const durationSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+
+    addCallDuration(cabinetKey, durationSeconds);
+    session.tracking.durationTracked = true;
+}
+
 function resetToMenu(session, callSid = "UNKNOWN", reason = "MANUAL_RESET") {
     logWarn("RESET_TO_MENU", {
         callSid,
@@ -512,6 +568,8 @@ function handleRetry(vr, res, session, callSid, reason = "UNKNOWN") {
             reason,
         });
 
+        trackFailedCall(session, "cabinet_test_001");
+        trackCallDuration(session, "cabinet_test_001");
         logCallOutcome(callSid, "CALL_ENDED_MISUNDERSTOOD", session, {
             failedStep: session.step,
             reason,
@@ -1812,7 +1870,7 @@ async function proposeBookingSlots({
     return sendTwiml(res, vr);
 }
 
-async function finalizeBooking(vr, res, session, callSid, cabinet) {
+async function finalizeBooking(vr, res, session, callSid, cabinet, cabinetId) {
     const slot = session.pendingSlot;
     session.pendingSlot = null;
 
@@ -1871,6 +1929,9 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
     });
 
     if (result.ok) {
+        incrementMetric(cabinetId, "appointmentsBooked");
+        trackCallHandled(session, cabinetId);
+        trackCallDuration(session, cabinetId);
         logCallOutcome(callSid, "BOOK_SUCCESS", session, {
             eventId: result.event?.id || null,
             slot: summarizeSlot(slot),
@@ -1913,6 +1974,7 @@ async function finalizeBooking(vr, res, session, callSid, cabinet) {
         });
         return sendTwiml(res, vr);
     }
+
 
     const statusMsg =
         result.code === "LOCKED"
@@ -1969,7 +2031,7 @@ router.post("/voice", async (req, res) => {
 
     const billingCabinet = getCabinetBilling(cabinetId);
 
-   if (!billingCabinet || billingCabinet.status !== "active") {
+    if (!billingCabinet || billingCabinet.status !== "active") {
         logWarn("CABINET_SUBSCRIPTION_INACTIVE", {
             callSid: safeCallSid(req),
             cabinetId,
@@ -1997,6 +2059,7 @@ router.post("/voice", async (req, res) => {
     const digits = (req.body?.Digits || "").trim();
 
     const session = getSession(callSid);
+    trackCallReceived(session, cabinetId);
 
     logInfo("VOICE_WEBHOOK", {
         callSid,
@@ -2074,6 +2137,8 @@ router.post("/voice", async (req, res) => {
             return sendTwiml(res, vr);
         }
 
+        trackFailedCall(session, cabinetId);
+        trackCallDuration(session, cabinetId);
         logCallOutcome(callSid, "CALL_ENDED_NO_INPUT", session, {
             step: session.step,
             noInputCount: session.noInputCount,
@@ -2757,7 +2822,7 @@ router.post("/voice", async (req, res) => {
             session.phone = session.phoneCandidate;
             session.phoneCandidate = "";
 
-            return finalizeBooking(vr, res, session, callSid, cabinet);
+            return finalizeBooking(vr, res, session, callSid, cabinet, cabinetId);
         }
 
         if (session.step === "BOOK_PICK_ALT") {
@@ -2889,6 +2954,9 @@ router.post("/voice", async (req, res) => {
             });
 
             if (result.ok) {
+                incrementMetric(cabinetId, "appointmentsBooked");
+                trackCallHandled(session, cabinetId);
+                trackCallDuration(session, cabinetId);
                 logCallOutcome(callSid, "BOOK_ALT_SUCCESS", session, {
                     eventId: result.event?.id || null,
                     slot: summarizeSlot(slot),
@@ -3413,6 +3481,9 @@ router.post("/voice", async (req, res) => {
             });
 
             if (result.ok) {
+                incrementMetric(cabinetId, "appointmentsModified");
+                trackCallHandled(session, cabinetId);
+                trackCallDuration(session, cabinetId);
                 logCallOutcome(callSid, "MODIFY_SUCCESS", session, {
                     oldEventId: session.foundEvent?.eventId || null,
                     oldStartISO: session.foundEvent?.startISO || null,
@@ -3780,6 +3851,8 @@ router.post("/voice", async (req, res) => {
                 cancelledStartISO: found.startISO,
             });
 
+            incrementMetric(cabinetId, "appointmentsCancelled");
+            trackCallHandled(session, cabinetId);
             setStep(session, callSid, "CANCEL_ASK_REBOOK", {
                 trigger: "CANCEL_SUCCESS",
                 cancelledEventId: found.eventId || null,
@@ -3816,6 +3889,7 @@ router.post("/voice", async (req, res) => {
             }
 
             if (yesNo === false) {
+                trackCallDuration(session, cabinetId);
                 logCallOutcome(callSid, "CANCEL_COMPLETED_NO_REBOOK", session);
 
                 sayAck(vr, session, "confirm");
@@ -3862,6 +3936,8 @@ router.post("/voice", async (req, res) => {
                     cabinet?.addressSpeech ||
                     "Le cabinet se situe à l'adresse renseignée par le cabinet."
                 );
+                trackCallHandled(session, cabinetId);
+                trackCallDuration(session, cabinetId);
                 logCallOutcome(callSid, "INFO_ADDRESS_GIVEN", session);
                 sayGoodbye(vr);
                 clearSessionWithLog(callSid, session, "INFO_ADDRESS_GIVEN");
@@ -3874,6 +3950,8 @@ router.post("/voice", async (req, res) => {
                     cabinet?.hoursSpeech ||
                     "Le cabinet est ouvert du lundi au vendredi de 8 heures à 12 heures et de 14 heures à 19 heures."
                 );
+                trackCallHandled(session, cabinetId);
+                trackCallDuration(session, cabinetId);
                 logCallOutcome(callSid, "INFO_HOURS_GIVEN", session);
                 sayGoodbye(vr);
                 clearSessionWithLog(callSid, session, "INFO_HOURS_GIVEN");
@@ -3915,6 +3993,8 @@ router.post("/voice", async (req, res) => {
             patientName: session.patientName || "",
         });
 
+        trackFailedCall(session, cabinetId);
+        trackCallDuration(session, cabinetId);
         logCallOutcome(callSid, "UNEXPECTED_ERROR", session, {
             errorMessage: err?.message,
             step: session.step,
