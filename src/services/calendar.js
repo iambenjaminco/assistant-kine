@@ -2,6 +2,11 @@
 const { google } = require("googleapis");
 const { getAuth } = require("../config/googleAuth");
 
+const {
+    acquireSlotLock,
+    releaseSlotLock,
+} = require("./slotLock");
+
 const DEFAULT_TIMEZONE = "Europe/Paris";
 const DEFAULT_SLOT_MINUTES = 30;
 const DEFAULT_FIRST_APPOINTMENT_MINUTES = 45;
@@ -183,7 +188,6 @@ const PRIORITY_PREFERENCE_RULES = {
     },
 };
 
-const slotLocks = new Map();
 
 function logInfo(event, data = {}) {
     console.log(`[CALENDAR][${event}]`, data);
@@ -213,28 +217,36 @@ function normalizePhone(s) {
     return (s || "").toString().replace(/\D/g, "");
 }
 
-function lockKey(calendarId, startDate, endDate) {
-    return `${calendarId}|${new Date(startDate).toISOString()}|${new Date(
-        endDate
-    ).toISOString()}`;
-}
 
-function acquireSlotLock(key, ttlMs = 60_000) {
-    const now = Date.now();
-    const expiresAt = slotLocks.get(key);
+function inferAppointmentTypeFromEvent(event = {}) {
+    const text = [
+        event.summary || "",
+        event.description || "",
+    ]
+        .join(" ")
+        .toLowerCase();
 
-    if (expiresAt && expiresAt <= now) {
-        slotLocks.delete(key);
+    if (
+        text.includes("premier rendez-vous") ||
+        text.includes("premiere consultation") ||
+        text.includes("nouveau patient") ||
+        text.includes("premier rendez vous")
+    ) {
+        return "FIRST";
     }
 
-    if (slotLocks.has(key)) return false;
-
-    slotLocks.set(key, now + ttlMs);
-    return true;
+    return "FOLLOW_UP";
 }
 
-function releaseSlotLock(key) {
-    slotLocks.delete(key);
+function computeEventDurationMinutes(startISO, endISO) {
+    const start = new Date(startISO).getTime();
+    const end = new Date(endISO).getTime();
+
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        return null;
+    }
+
+    return Math.round((end - start) / 60000);
 }
 
 function overlaps(aStart, aEnd, bStart, bEnd) {
@@ -944,10 +956,9 @@ function generateDynamicCandidateSlots({
     days,
     slotMinutes,
     cabinet,
-    busyByCal,
-    practitioners,
 }) {
     const timezone = getTimeZoneForCabinet(cabinet);
+    const stepMinutes = getCabinetSlotStep(cabinet);
     const allCandidates = [];
     const seen = new Set();
 
@@ -961,50 +972,34 @@ function generateDynamicCandidateSlots({
         if (availability.isClosed || !availability.ranges.length) continue;
 
         for (const range of availability.ranges) {
-            const rangeStart = dateAtTime(day, range.start, timezone);
-            const rangeEnd = dateAtTime(day, range.end, timezone);
+            const rangeStartMinutes = parseHHMMToMinutes(range.start);
+            const rangeEndMinutes = parseHHMMToMinutes(range.end);
 
-            const candidateStarts = [new Date(rangeStart)];
-
-            for (const practitioner of practitioners) {
-                const busy = busyByCal[practitioner.calendarId] || [];
-
-                for (const b of busy) {
-                    const busyEnd = new Date(b.end);
-
-                    if (busyEnd > rangeStart && busyEnd < rangeEnd) {
-                        candidateStarts.push(new Date(busyEnd));
-                    }
-                }
+            if (
+                !Number.isFinite(rangeStartMinutes) ||
+                !Number.isFinite(rangeEndMinutes) ||
+                rangeEndMinutes <= rangeStartMinutes
+            ) {
+                continue;
             }
 
-            candidateStarts.sort((a, b) => a.getTime() - b.getTime());
-
-            for (const candidateStart of candidateStarts) {
+            for (
+                let startMinutes = rangeStartMinutes;
+                startMinutes + slotMinutes <= rangeEndMinutes;
+                startMinutes += stepMinutes
+            ) {
+                const candidateStart = dateAtMinutesInTimezone(day, startMinutes, timezone);
                 const candidateEnd = new Date(candidateStart);
                 candidateEnd.setMinutes(candidateEnd.getMinutes() + slotMinutes);
 
-                const startMinutes = getMinutesInTimezone(candidateStart, timezone);
-                const endMinutes = startMinutes + slotMinutes;
+                const key = `${candidateStart.toISOString()}|${candidateEnd.toISOString()}`;
+                if (seen.has(key)) continue;
 
-                if (
-                    candidateStart >= rangeStart &&
-                    candidateEnd <= rangeEnd &&
-                    isWithinRangesByMinutes(
-                        startMinutes,
-                        endMinutes,
-                        availability.ranges
-                    )
-                ) {
-                    const key = `${candidateStart.toISOString()}|${candidateEnd.toISOString()}`;
-                    if (!seen.has(key)) {
-                        seen.add(key);
-                        allCandidates.push({
-                            start: candidateStart,
-                            end: candidateEnd,
-                        });
-                    }
-                }
+                seen.add(key);
+                allCandidates.push({
+                    start: candidateStart,
+                    end: candidateEnd,
+                });
             }
         }
     }
@@ -1232,6 +1227,10 @@ async function createAppointment({
     if (!calendarId) {
         throw new Error("calendarId requis");
     }
+
+    if (!cabinet) {
+        throw new Error("cabinet requis");
+    }
     const calendar = await getCalendarClient();
     const timezone = getTimeZoneForCabinet(cabinet);
 
@@ -1261,6 +1260,7 @@ async function createAppointment({
         ...(phone ? [`Téléphone : ${phone}`] : []),
         ...(appointmentType ? [`Type : ${appointmentType}`] : []),
         `Durée : ${effectiveDurationMinutes} min`,
+        ...(cabinet?.key ? [`Cabinet : ${cabinet.key}`] : []),
         "Origine : Assistant vocal SaaS",
         "Canal : Téléphone",
     ];
@@ -1346,9 +1346,7 @@ async function bookAppointmentSafe({
         end.setMinutes(end.getMinutes() + effectiveMinutes);
     }
 
-    const key = lockKey(calendarId, start, end);
-
-    const gotLock = acquireSlotLock(key, 60_000);
+    const gotLock = await acquireSlotLock(calendarId, start, end, 60_000);
     if (!gotLock) return { ok: false, code: "LOCKED" };
 
     try {
@@ -1375,7 +1373,7 @@ async function bookAppointmentSafe({
 
         return { ok: true, event };
     } finally {
-        releaseSlotLock(key);
+        await releaseSlotLock(calendarId, start, end);
     }
 }
 
@@ -1470,8 +1468,6 @@ async function suggestTwoSlotsNext7Days({
         days: effectiveDays,
         slotMinutes,
         cabinet,
-        busyByCal,
-        practitioners,
     });
 
     const cutoff = buildCutoff(now, effectiveMinLeadMinutes);
@@ -1601,8 +1597,6 @@ async function suggestTwoSlotsFromDate({
         days: effectiveDays,
         slotMinutes,
         cabinet,
-        busyByCal,
-        practitioners,
     });
 
     const now = new Date();
@@ -1858,7 +1852,7 @@ async function suggestTwoSlotsFromDate({
     });
 }
 
-async function findNextAppointmentSafe({ cabinet, practitioners, patientName, phone }) {
+async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
     assertPractitioners(practitioners);
 
     const { timezone } = getCalendarClientCachedMeta(practitioners, cabinet);
@@ -1878,7 +1872,7 @@ async function findNextAppointmentSafe({ cabinet, practitioners, patientName, ph
             timeMin,
             singleEvents: true,
             orderBy: "startTime",
-            maxResults: 100,
+            maxResults: 250,
         });
 
         const items = res.data.items || [];
@@ -1888,16 +1882,24 @@ async function findNextAppointmentSafe({ cabinet, practitioners, patientName, ph
 
             const startISO = ev.start?.dateTime || ev.start?.date;
             if (!startISO) continue;
+            if (!ev.start?.dateTime || !ev.end?.dateTime) continue;
 
             const eventPhone = extractPhoneFromEvent(ev);
             if (eventPhone !== phoneNorm) continue;
+
+            const endISO = ev.end?.dateTime || ev.end?.date || null;
+            const appointmentType = inferAppointmentTypeFromEvent(ev);
+            const durationMinutes = computeEventDurationMinutes(startISO, endISO);
 
             const candidate = {
                 calendarId: p.calendarId,
                 eventId: ev.id,
                 startISO,
+                endISO,
                 summary: ev.summary || "",
                 patientName: extractPatientNameFromEvent(ev),
+                appointmentType,
+                durationMinutes,
             };
 
             if (!best) {
@@ -1918,8 +1920,11 @@ async function findNextAppointmentSafe({ cabinet, practitioners, patientName, ph
         calendarId: best.calendarId,
         eventId: best.eventId,
         startISO: best.startISO,
+        endISO: best.endISO,
         summary: best.summary,
         patientName: best.patientName,
+        appointmentType: best.appointmentType,
+        durationMinutes: best.durationMinutes,
         timezone,
         cabinetKey: cabinet?.key || null,
     };
