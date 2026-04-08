@@ -4,6 +4,19 @@ const path = require("path");
 const DATA_DIR = path.join(process.cwd(), "data");
 const FILE_PATH = path.join(DATA_DIR, "cabinets.json");
 
+function findCabinetByTwilioNumber(twilioNumber) {
+  if (!twilioNumber) return null;
+
+  const normalized = twilioNumber.replace(/\s+/g, "");
+
+  const cabinets = Object.values(store || {});
+
+  return cabinets.find(c => {
+    if (!c.twilioNumber) return false;
+    return c.twilioNumber.replace(/\s+/g, "") === normalized;
+  }) || null;
+}
+
 function ensureFile() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -69,6 +82,7 @@ function findCabinetBySubscriptionId(subscriptionId) {
 module.exports = {
   getCabinet,
   upsertCabinet,
+  findCabinetByTwilioNumber,
   findCabinetByCustomerId,
   findCabinetBySubscriptionId,
 };
