@@ -3340,13 +3340,30 @@ router.post("/voice", async (req, res) => {
             const choice = pickChoiceFromSpeech(speech, digits, session.slots);
 
             if (choice === null) {
+                const a = session.slots?.[0];
+                const b = session.slots?.[1] || session.slots?.[0];
+
+                if (!a) {
+                    session.slots = [];
+                    session.pendingSlot = null;
+                    session.requestedDateISO = null;
+
+                    sayFr(vr, "Je relance une recherche de disponibilités.");
+                    return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
+                }
+
                 const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_PICK_ALT");
                 if (retry) return retry;
 
-                const prompt = "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour.";
+                const prompt = getSlotSelectionPrompt(session);
                 setPrompt(session, prompt);
 
                 const gather = gatherSpeech(vr, "/twilio/voice");
+                gather.say(SAY_OPTS, "Je n'ai pas bien compris.");
+                gather.say(
+                    SAY_OPTS,
+                    `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou un autre jour.`
+                );
                 gather.say(SAY_OPTS, prompt);
 
                 return sendTwiml(res, vr, callSid, session);
@@ -3775,6 +3792,19 @@ router.post("/voice", async (req, res) => {
             ) {
                 usedAnyPractitionerFallback = true;
 
+                logInfo("MODIFY_ANY_PRACTITIONER_FALLBACK", {
+                    callSid,
+                    cabinetId,
+                    preferredPractitioner: session.preferredPractitioner?.name || null,
+                    oldEventId: session.foundEvent?.eventId || null,
+                    oldStartISO: session.foundEvent?.startISO || null,
+                    preferredTimeWindow: session.preferredTimeWindow || null,
+                    preferredHourMinutes: Number.isFinite(session.preferredHourMinutes)
+                        ? session.preferredHourMinutes
+                        : null,
+                    priorityPreference: session.priorityPreference || null,
+                });
+
                 result = await withTimeout(
                     suggestTwoSlotsNext7Days({
                         cabinet: activeCabinet,
@@ -3931,13 +3961,34 @@ router.post("/voice", async (req, res) => {
             const choice = pickChoiceFromSpeech(speech, digits, session.slots);
 
             if (choice === null) {
+                const a = session.slots?.[0];
+                const b = session.slots?.[1] || session.slots?.[0];
+
+                if (!a) {
+                    session.slots = [];
+                    session.pendingSlot = null;
+                    session.requestedDateISO = null;
+
+                    setStep(session, callSid, "MODIFY_PROPOSE_NEW", {
+                        trigger: "MODIFY_SLOTS_LOST_RETRY",
+                    });
+                    setPrompt(session, "");
+                    vr.redirect({ method: "POST" }, "/twilio/voice");
+                    return sendTwiml(res, vr, callSid, session);
+                }
+
                 const retry = await handleRetry(vr, res, session, callSid, cabinetId, "MODIFY_PICK_NEW");
                 if (retry) return retry;
 
-                const prompt = "Je n’ai pas bien compris. Vous pouvez me dire le premier, le deuxième, ou un autre jour.";
+                const prompt = getSlotSelectionPrompt(session);
                 setPrompt(session, prompt);
 
                 const gather = gatherSpeech(vr, "/twilio/voice");
+                gather.say(SAY_OPTS, "Je n'ai pas bien compris.");
+                gather.say(
+                    SAY_OPTS,
+                    `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou un autre jour.`
+                );
                 gather.say(SAY_OPTS, prompt);
 
                 return sendTwiml(res, vr, callSid, session);
@@ -4568,7 +4619,7 @@ router.post("/voice", async (req, res) => {
                 );
             }
 
-            resetBookingFlowState(session);
+            resetBookingFlowState(session, { keepIdentity: true });
             session.lastIntentContext = "BOOK";
             session.phonePurpose = "BOOK";
             session.initialBookingSpeech = "";

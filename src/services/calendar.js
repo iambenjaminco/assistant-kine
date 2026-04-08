@@ -317,7 +317,7 @@ function resolveSlotMinutes({
         : DEFAULT_SLOT_MINUTES;
 }
 
-function getCalendarClientCachedMeta(practitioners = [], cabinet = null) {
+function getCalendarContext(cabinet = null) {
     const timezone = getTimeZoneForCabinet(cabinet);
     return { cabinet, timezone };
 }
@@ -1227,10 +1227,7 @@ async function createAppointment({
     if (!calendarId) {
         throw new Error("calendarId requis");
     }
-
-    if (!cabinet) {
-        throw new Error("cabinet requis");
-    }
+    assertCabinet(cabinet);
     const calendar = await getCalendarClient();
     const timezone = getTimeZoneForCabinet(cabinet);
 
@@ -1253,10 +1250,11 @@ async function createAppointment({
 
     const startIso = start.toISOString();
     const endIso = end.toISOString();
+    const safePatientName = String(patientName || "").trim() || "Patient";
 
     const lines = [
         reason || "Rendez-vous kiné",
-        `Patient : ${patientName || "Patient"}`,
+        `Patient : ${safePatientName}`,
         ...(phone ? [`Téléphone : ${phone}`] : []),
         ...(appointmentType ? [`Type : ${appointmentType}`] : []),
         `Durée : ${effectiveDurationMinutes} min`,
@@ -1268,7 +1266,7 @@ async function createAppointment({
     const description = lines.join("\n");
 
     const event = {
-        summary: `RDV kiné - ${patientName || "Patient"}`,
+        summary: `RDV kiné - ${safePatientName}`,
         description,
         start: { dateTime: startIso, timeZone: timezone },
         end: { dateTime: endIso, timeZone: timezone },
@@ -1291,6 +1289,7 @@ async function isSlotAvailable({
     if (!calendarId) {
         throw new Error("calendarId requis");
     }
+    assertCabinet(cabinet);
     const calendar = await getCalendarClient();
     const timezone = getTimeZoneForCabinet(cabinet);
 
@@ -1328,9 +1327,7 @@ async function bookAppointmentSafe({
     if (!calendarId) {
         throw new Error("calendarId requis");
     }
-    if (!cabinet) {
-        throw new Error("cabinet requis");
-    }
+    assertCabinet(cabinet);
 
     const effectiveCabinet = cabinet;
     const start = new Date(startDate);
@@ -1347,7 +1344,15 @@ async function bookAppointmentSafe({
     }
 
     const gotLock = await acquireSlotLock(calendarId, start, end, 60_000);
-    if (!gotLock) return { ok: false, code: "LOCKED" };
+    if (!gotLock) {
+        logWarn("BOOK_SLOT_LOCKED", {
+            cabinetKey: effectiveCabinet?.key || null,
+            calendarId,
+            startISO: start.toISOString(),
+            endISO: end.toISOString(),
+        });
+        return { ok: false, code: "LOCKED" };
+    }
 
     try {
         const ok = await isSlotAvailable({
@@ -1357,7 +1362,15 @@ async function bookAppointmentSafe({
             cabinet: effectiveCabinet,
         });
 
-        if (!ok) return { ok: false, code: "TAKEN" };
+        if (!ok) {
+            logWarn("BOOK_SLOT_TAKEN", {
+                cabinetKey: effectiveCabinet?.key || null,
+                calendarId,
+                startISO: start.toISOString(),
+                endISO: end.toISOString(),
+            });
+            return { ok: false, code: "TAKEN" };
+        }
 
         const event = await createAppointment({
             calendarId,
@@ -1388,6 +1401,16 @@ function assertPractitioners(practitioners) {
     }
 }
 
+function assertCabinet(cabinet) {
+    if (!cabinet) {
+        throw new Error("cabinet requis");
+    }
+
+    if (!cabinet.key) {
+        throw new Error("cabinet.key manquant");
+    }
+}
+
 function buildCutoff(now, minLeadMinutes) {
     const cutoff = new Date(now);
     cutoff.setMinutes(cutoff.getMinutes() + minLeadMinutes);
@@ -1413,8 +1436,9 @@ async function suggestTwoSlotsNext7Days({
     minLeadMinutes,
 }) {
     assertPractitioners(practitioners);
+    assertCabinet(cabinet);
 
-    const { timezone } = getCalendarClientCachedMeta(practitioners, cabinet);
+    const { timezone } = getCalendarContext(cabinet);
     const calendar = await getCalendarClient();
 
     const effectiveDays = Number.isFinite(Number(days))
@@ -1534,8 +1558,9 @@ async function suggestTwoSlotsFromDate({
     minLeadMinutes,
 }) {
     assertPractitioners(practitioners);
+    assertCabinet(cabinet);
 
-    const { timezone } = getCalendarClientCachedMeta(practitioners, cabinet);
+    const { timezone } = getCalendarContext(cabinet);
     const calendar = await getCalendarClient();
 
     const effectiveDays = Number.isFinite(Number(days))
@@ -1854,8 +1879,9 @@ async function suggestTwoSlotsFromDate({
 
 async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
     assertPractitioners(practitioners);
+    assertCabinet(cabinet);
 
-    const { timezone } = getCalendarClientCachedMeta(practitioners, cabinet);
+    const { timezone } = getCalendarContext(cabinet);
     const calendar = await getCalendarClient();
     const phoneNorm = normalizePhone(phone);
 
@@ -1867,51 +1893,58 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
     let best = null;
 
     for (const p of practitioners) {
-        const res = await calendar.events.list({
-            calendarId: p.calendarId,
-            timeMin,
-            singleEvents: true,
-            orderBy: "startTime",
-            maxResults: 250,
-        });
+        let pageToken = undefined;
 
-        const items = res.data.items || [];
-
-        for (const ev of items) {
-            if (ev.status === "cancelled") continue;
-
-            const startISO = ev.start?.dateTime || ev.start?.date;
-            if (!startISO) continue;
-            if (!ev.start?.dateTime || !ev.end?.dateTime) continue;
-
-            const eventPhone = extractPhoneFromEvent(ev);
-            if (eventPhone !== phoneNorm) continue;
-
-            const endISO = ev.end?.dateTime || ev.end?.date || null;
-            const appointmentType = inferAppointmentTypeFromEvent(ev);
-            const durationMinutes = computeEventDurationMinutes(startISO, endISO);
-
-            const candidate = {
+        do {
+            const res = await calendar.events.list({
                 calendarId: p.calendarId,
-                eventId: ev.id,
-                startISO,
-                endISO,
-                summary: ev.summary || "",
-                patientName: extractPatientNameFromEvent(ev),
-                appointmentType,
-                durationMinutes,
-            };
+                timeMin,
+                singleEvents: true,
+                orderBy: "startTime",
+                maxResults: 250,
+                pageToken,
+            });
 
-            if (!best) {
-                best = candidate;
-                continue;
+            const items = res.data.items || [];
+
+            for (const ev of items) {
+                if (ev.status === "cancelled") continue;
+
+                const startISO = ev.start?.dateTime || ev.start?.date;
+                if (!startISO) continue;
+                if (!ev.start?.dateTime || !ev.end?.dateTime) continue;
+
+                const eventPhone = extractPhoneFromEvent(ev);
+                if (eventPhone !== phoneNorm) continue;
+
+                const endISO = ev.end?.dateTime || ev.end?.date || null;
+                const appointmentType = inferAppointmentTypeFromEvent(ev);
+                const durationMinutes = computeEventDurationMinutes(startISO, endISO);
+
+                const candidate = {
+                    calendarId: p.calendarId,
+                    eventId: ev.id,
+                    startISO,
+                    endISO,
+                    summary: ev.summary || "",
+                    patientName: extractPatientNameFromEvent(ev),
+                    appointmentType,
+                    durationMinutes,
+                };
+
+                if (!best) {
+                    best = candidate;
+                    continue;
+                }
+
+                const bestTime = new Date(best.startISO).getTime();
+                const candTime = new Date(candidate.startISO).getTime();
+
+                if (candTime < bestTime) best = candidate;
             }
 
-            const bestTime = new Date(best.startISO).getTime();
-            const candTime = new Date(candidate.startISO).getTime();
-
-            if (candTime < bestTime) best = candidate;
-        }
+            pageToken = res.data.nextPageToken || undefined;
+        } while (pageToken);
     }
 
     if (!best) return null;
