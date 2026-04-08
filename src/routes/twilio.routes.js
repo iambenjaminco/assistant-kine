@@ -2228,11 +2228,75 @@ async function continueBookingAfterPractitionerSelection({
     promptAndGather(
         vr,
         session,
-        "Quel jour vous conviendrait ? Vous pouvez dire par exemple demain, lundi prochain, ou une date précise.",
+        "Quel jour vous conviendrait ?",
         introSpeech
     );
 
     return sendTwiml(res, vr, callSid, session);
+}
+
+function asksWhoAreThePractitioners(text) {
+    const t = normalizeText(text);
+    if (!t) return false;
+
+    return (
+        t.includes("il y a qui comme kine") ||
+        t.includes("il y a qui comme kiné") ||
+        t.includes("quels kines") ||
+        t.includes("quels kinés") ||
+        t.includes("qui sont les kines") ||
+        t.includes("qui sont les kinés") ||
+        t.includes("vous avez quels kines") ||
+        t.includes("vous avez quels kinés") ||
+        t.includes("avec quels kines") ||
+        t.includes("avec quels kinés")
+    );
+}
+
+function buildPractitionersSpeech(cabinet) {
+    const names = (cabinet?.practitioners || [])
+        .map((p) => String(p.name || "").trim())
+        .filter(Boolean);
+
+    if (!names.length) {
+        return "Je n’ai pas la liste des kinés du cabinet.";
+    }
+
+    if (names.length === 1) {
+        return `Au cabinet, il y a ${names[0]}.`;
+    }
+
+    if (names.length === 2) {
+        return `Au cabinet, il y a ${names[0]} et ${names[1]}.`;
+    }
+
+    return `Au cabinet, il y a ${names.slice(0, -1).join(", ")} et ${names[names.length - 1]}.`;
+}
+
+function wantsRepeat(text) {
+    const t = normalizeText(text);
+    if (!t) return false;
+
+    return (
+        t.includes("repete") ||
+        t.includes("repeter") ||
+        t.includes("répète") ||
+        t.includes("répéter") ||
+        t.includes("vous pouvez repeter") ||
+        t.includes("vous pouvez répéter") ||
+        t.includes("redis") ||
+        t.includes("redites") ||
+        t.includes("je n'ai pas compris") ||
+        t.includes("j'ai pas compris")
+    );
+}
+
+function repeatCurrentPrompt(vr, session) {
+    const prompt = session.lastPrompt || "Je répète.";
+    const gather = gatherSpeech(vr, "/twilio/voice");
+    gather.say(SAY_OPTS, "Je répète.");
+    gather.say(SAY_OPTS, prompt);
+    return gather;
 }
 
 async function finalizeBooking(vr, res, session, callSid, cabinet, cabinetId) {
@@ -2540,6 +2604,11 @@ router.post("/voice", async (req, res) => {
 
     const hasInput = Boolean(speech || digits);
     const normalizedSpeech = normalizeText(speech);
+
+    if (hasInput && wantsRepeat(normalizedSpeech) && session.step !== "ACTION") {
+        repeatCurrentPrompt(vr, session);
+        return sendTwiml(res, vr, callSid, session);
+    }
 
     if (isCallTooLong(session)) {
         logWarn("CALL_MAX_DURATION_REACHED", {
@@ -2879,6 +2948,13 @@ router.post("/voice", async (req, res) => {
             const usual = detectUsualPractitionerIntent(speech);
             const yesNo = parseYesNo(speech);
 
+            if (asksWhoAreThePractitioners(speech)) {
+                const gather = gatherSpeech(vr, "/twilio/voice");
+                gather.say(SAY_OPTS, buildPractitionersSpeech(activeCabinet));
+                gather.say(SAY_OPTS, getPractitionerPrompt(session));
+                return sendTwiml(res, vr, callSid, session);
+            }
+
             if (practitioner) {
                 session.preferredPractitioner = practitioner;
                 session.practitionerPreferenceMode = "SPECIFIC";
@@ -2973,6 +3049,13 @@ router.post("/voice", async (req, res) => {
             const practitioner = findPractitionerBySpeech(speech, activeCabinet);
             const noPreference = detectNoPractitionerPreference(speech);
 
+            if (asksWhoAreThePractitioners(speech)) {
+                const gather = gatherSpeech(vr, "/twilio/voice");
+                gather.say(SAY_OPTS, buildPractitionersSpeech(activeCabinet));
+                gather.say(SAY_OPTS, "Quel est le nom du kiné souhaité ?");
+                return sendTwiml(res, vr, callSid, session);
+            }
+
             if (practitioner) {
                 session.preferredPractitioner = practitioner;
                 session.practitionerPreferenceMode = "SPECIFIC";
@@ -3031,6 +3114,13 @@ router.post("/voice", async (req, res) => {
         if (session.step === "BOOK_ASK_USUAL_PRACTITIONER") {
             const practitioner = findPractitionerBySpeech(speech, activeCabinet);
             const noPreference = detectNoPractitionerPreference(speech);
+
+            if (asksWhoAreThePractitioners(speech)) {
+                const gather = gatherSpeech(vr, "/twilio/voice");
+                gather.say(SAY_OPTS, buildPractitionersSpeech(activeCabinet));
+                gather.say(SAY_OPTS, "Avec quel kiné êtes-vous habituellement suivi ?");
+                return sendTwiml(res, vr, callSid, session);
+            }
 
             if (practitioner) {
                 session.preferredPractitioner = practitioner;
@@ -3293,17 +3383,6 @@ router.post("/voice", async (req, res) => {
                 return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
             }
 
-            logInfo("BOOK_REQUESTED_DATE_PARSED", {
-                callSid,
-                speech,
-                requestedDateISO,
-                preferredTimeWindow: session.preferredTimeWindow || null,
-                preferredHourMinutes: Number.isFinite(session.preferredHourMinutes)
-                    ? session.preferredHourMinutes
-                    : null,
-                priorityPreference: session.priorityPreference || null,
-            });
-
             if (!requestedDateISO) {
                 const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_ASK_PREFERRED_DATE");
                 if (retry) return retry;
@@ -3311,7 +3390,7 @@ router.post("/voice", async (req, res) => {
                 promptAndGather(
                     vr,
                     session,
-                    "Je n’ai pas compris le jour demandé. Merci de me redonner simplement un jour ou une date."
+                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple demain, lundi prochain, ou une date précise."
                 );
                 return sendTwiml(res, vr, callSid, session);
             }

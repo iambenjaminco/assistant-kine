@@ -483,9 +483,12 @@ function parseFromDateInput(fromDate, timezone = DEFAULT_TIMEZONE) {
 
     if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
         const [year, month, day] = raw.split("-").map(Number);
+
+        // On ancre la date au milieu de journée dans le fuseau du cabinet
+        // pour éviter qu’un minuit local devienne "la veille" côté serveur.
         return dateAtMinutesInTimezone(
             new Date(Date.UTC(year, month - 1, day, 12, 0, 0, 0)),
-            0,
+            12 * 60,
             timezone
         );
     }
