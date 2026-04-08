@@ -28,17 +28,25 @@ function writeCabinets(data) {
 function findCabinetByTwilioNumber(twilioNumber) {
   if (!twilioNumber) return null;
 
-  const normalized = String(twilioNumber).replace(/\s+/g, "");
-
+  const normalized = twilioNumber.replace(/\s+/g, "");
   const cabinets = readCabinets();
 
   for (const [cabinetId, cabinet] of Object.entries(cabinets)) {
-    if (!cabinet?.twilioNumber) continue;
+    const phone =
+      cabinet.twilioPhoneNumber ||
+      cabinet.twilioNumber ||
+      "";
 
-    const cabinetNumber = String(cabinet.twilioNumber).replace(/\s+/g, "");
+    if (!phone) continue;
 
-    if (cabinetNumber === normalized) {
-      return { cabinetId, cabinet };
+    if (phone.replace(/\s+/g, "") === normalized) {
+      return {
+        cabinetId,
+        cabinet: {
+          key: cabinet.key || cabinetId,
+          ...cabinet,
+        },
+      };
     }
   }
 
@@ -47,7 +55,14 @@ function findCabinetByTwilioNumber(twilioNumber) {
 
 function getCabinet(cabinetId) {
   const cabinets = readCabinets();
-  return cabinets[cabinetId] || null;
+  const cabinet = cabinets[cabinetId] || null;
+
+  if (!cabinet) return null;
+
+  return {
+    key: cabinet.key || cabinetId,
+    ...cabinet,
+  };
 }
 
 function upsertCabinet(cabinetId, updates) {
