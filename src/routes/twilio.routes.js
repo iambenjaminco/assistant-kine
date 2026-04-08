@@ -738,9 +738,12 @@ function startOfDay(date) {
     return d;
 }
 
-function buildDateAtStartOfDayISO(date) {
+function buildDateKey(date) {
     const d = startOfDay(date);
-    return d.toISOString();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
 }
 
 function getFrenchMonthIndex(token) {
@@ -837,15 +840,15 @@ function parseRequestedDate(text) {
     const today = startOfDay(now);
 
     if (raw.includes("aujourd'hui") || raw.includes("aujourdhui")) {
-        return buildDateAtStartOfDayISO(today);
+        return buildDateKey(today);
     }
 
     if (raw.includes("apres demain")) {
-        return buildDateAtStartOfDayISO(addDays(today, 2));
+        return buildDateKey(addDays(today, 2));
     }
 
     if (raw.includes("demain")) {
-        return buildDateAtStartOfDayISO(addDays(today, 1));
+        return buildDateKey(addDays(today, 1));
     }
 
     const numericMatch = raw.match(/\b(\d{1,2})[\/.-](\d{1,2})(?:[\/.-](\d{2,4}))?\b/);
@@ -860,7 +863,7 @@ function parseRequestedDate(text) {
             if (!numericMatch[3] && startOfDay(d) < today) {
                 d.setFullYear(d.getFullYear() + 1);
             }
-            return buildDateAtStartOfDayISO(d);
+            return buildDateKey(d);
         }
     }
 
@@ -878,7 +881,7 @@ function parseRequestedDate(text) {
                 if (!longDateMatch[3] && startOfDay(d) < today) {
                     d.setFullYear(d.getFullYear() + 1);
                 }
-                return buildDateAtStartOfDayISO(d);
+                return buildDateKey(d);
             }
         }
     }
@@ -890,7 +893,7 @@ function parseRequestedDate(text) {
         const dow = getFrenchWeekdayIndex(weekdayMatch[1]);
         const forceNextWeek = raw.includes("prochain");
         if (dow !== null) {
-            return buildDateAtStartOfDayISO(
+            return buildDateKey(
                 computeNextWeekdayDate(dow, forceNextWeek)
             );
         }
@@ -1893,9 +1896,13 @@ async function proposeSlotsFromRequestedDate({
     });
 
     const hydratedSlots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
-    const filtered = getFilteredSlotsResponse(session, hydratedSlots, emptyMessage);
 
-    session.slots = filtered.slots;
+    session.slots = hydratedSlots.slice(0, 2);
+    const filtered = {
+        slots: session.slots,
+        hasTimeFilterMiss: !session.slots.length && Boolean(session.preferredTimeWindow),
+        prompt: emptyMessage,
+    };
     session.requestedDateISO = requestedDateISO;
     rememberLastProposedSlots(session);
 
@@ -3267,6 +3274,17 @@ router.post("/voice", async (req, res) => {
         if (session.step === "BOOK_ASK_PREFERRED_DATE") {
             const requestedDateISO = parseRequestedDate(speech);
 
+            logInfo("BOOK_REQUESTED_DATE_PARSED", {
+                callSid,
+                speech,
+                requestedDateISO,
+                preferredTimeWindow: session.preferredTimeWindow || null,
+                preferredHourMinutes: Number.isFinite(session.preferredHourMinutes)
+                    ? session.preferredHourMinutes
+                    : null,
+                priorityPreference: session.priorityPreference || null,
+            });
+
             if (!requestedDateISO && hasPreferenceRefinementRequest(speech)) {
                 session.slots = [];
                 session.pendingSlot = null;
@@ -3293,7 +3311,7 @@ router.post("/voice", async (req, res) => {
                 promptAndGather(
                     vr,
                     session,
-                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple jeudi, lundi prochain, demain, le 18 mars, ou simplement début de matinée, fin de matinée, début d'après-midi ou fin d'après-midi."
+                    "Je n’ai pas compris le jour demandé. Merci de me redonner simplement un jour ou une date."
                 );
                 return sendTwiml(res, vr, callSid, session);
             }

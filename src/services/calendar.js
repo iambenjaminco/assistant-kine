@@ -473,6 +473,26 @@ function dateAtTime(dayDate, hhmm, timezone = DEFAULT_TIMEZONE) {
     return dateAtMinutesInTimezone(dayDate, totalMinutes, timezone);
 }
 
+function parseFromDateInput(fromDate, timezone = DEFAULT_TIMEZONE) {
+    if (fromDate instanceof Date) {
+        return new Date(fromDate);
+    }
+
+    const raw = String(fromDate || "").trim();
+    if (!raw) return new Date(NaN);
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+        const [year, month, day] = raw.split("-").map(Number);
+        return dateAtMinutesInTimezone(
+            new Date(Date.UTC(year, month - 1, day, 12, 0, 0, 0)),
+            0,
+            timezone
+        );
+    }
+
+    return new Date(raw);
+}
+
 function getEasterDateUTC(year) {
     const f = Math.floor;
     const a = year % 19;
@@ -1590,7 +1610,7 @@ async function suggestTwoSlotsFromDate({
         resolvedSlotMinutes: slotMinutes,
     });
 
-    const start = new Date(fromDate);
+    const start = parseFromDateInput(fromDate, timezone);
     if (Number.isNaN(start.getTime())) {
         return buildSuggestResponse({
             status: "INVALID_FROM_DATE",
@@ -1598,7 +1618,15 @@ async function suggestTwoSlotsFromDate({
             speech: "Je n'ai pas compris la date demandée.",
             context: {},
         });
+
     }
+
+    logInfo("SUGGEST_FROM_DATE_PARSED", {
+        cabinetKey: cabinet?.key || null,
+        fromDateRaw: fromDate,
+        parsedStartISO: Number.isNaN(start.getTime()) ? null : start.toISOString(),
+        timezone,
+    });
     const timeMax = new Date(start);
     timeMax.setDate(timeMax.getDate() + effectiveDays);
 
