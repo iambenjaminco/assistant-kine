@@ -4,19 +4,6 @@ const path = require("path");
 const DATA_DIR = path.join(process.cwd(), "data");
 const FILE_PATH = path.join(DATA_DIR, "cabinets.json");
 
-function findCabinetByTwilioNumber(twilioNumber) {
-  if (!twilioNumber) return null;
-
-  const normalized = twilioNumber.replace(/\s+/g, "");
-
-  const cabinets = Object.values(store || {});
-
-  return cabinets.find(c => {
-    if (!c.twilioNumber) return false;
-    return c.twilioNumber.replace(/\s+/g, "") === normalized;
-  }) || null;
-}
-
 function ensureFile() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -36,6 +23,22 @@ function readCabinets() {
 function writeCabinets(data) {
   ensureFile();
   fs.writeFileSync(FILE_PATH, JSON.stringify(data, null, 2), "utf-8");
+}
+
+function findCabinetByTwilioNumber(twilioNumber) {
+  if (!twilioNumber) return null;
+
+  const normalized = String(twilioNumber).replace(/\s+/g, "");
+  const cabinets = readCabinets();
+
+  for (const [cabinetId, cabinet] of Object.entries(cabinets)) {
+    const storedNumber = String(cabinet?.twilioNumber || "").replace(/\s+/g, "");
+    if (storedNumber && storedNumber === normalized) {
+      return { cabinetId, cabinet };
+    }
+  }
+
+  return null;
 }
 
 function getCabinet(cabinetId) {
