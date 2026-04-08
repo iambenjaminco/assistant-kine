@@ -29,11 +29,15 @@ function findCabinetByTwilioNumber(twilioNumber) {
   if (!twilioNumber) return null;
 
   const normalized = String(twilioNumber).replace(/\s+/g, "");
+
   const cabinets = readCabinets();
 
   for (const [cabinetId, cabinet] of Object.entries(cabinets)) {
-    const storedNumber = String(cabinet?.twilioNumber || "").replace(/\s+/g, "");
-    if (storedNumber && storedNumber === normalized) {
+    if (!cabinet?.twilioNumber) continue;
+
+    const cabinetNumber = String(cabinet.twilioNumber).replace(/\s+/g, "");
+
+    if (cabinetNumber === normalized) {
       return { cabinetId, cabinet };
     }
   }
