@@ -774,18 +774,25 @@ function getFrenchWeekdayIndex(token) {
     return weekdays[token] ?? null;
 }
 
-function computeNextWeekdayDate(targetDow, nextWeek = false) {
-    const now = new Date();
-    const today = startOfDay(now);
+function getParisNow() {
+    return new Date(
+        new Date().toLocaleString("en-US", { timeZone: PARIS_TIMEZONE })
+    );
+}
+
+function computeNextWeekdayDate(targetDow, forceNextWeek = false) {
+    const nowParis = getParisNow();
+    const today = startOfDay(nowParis);
     const currentDow = today.getDay();
 
     let delta = targetDow - currentDow;
     if (delta < 0) delta += 7;
 
+    // Ex:
+    // mercredi -> lundi prochain = lundi qui vient (delta = 5)
+    // lundi -> lundi prochain = lundi de la semaine suivante (delta = 7)
     if (delta === 0) {
-        delta = nextWeek ? 7 : 0;
-    } else if (nextWeek) {
-        delta += 7;
+        delta = forceNextWeek ? 7 : 0;
     }
 
     return addDays(today, delta);
@@ -826,7 +833,7 @@ function parseRequestedDate(text) {
     const raw = normalizeText(text);
     if (!raw) return null;
 
-    const now = new Date();
+    const now = getParisNow();
     const today = startOfDay(now);
 
     if (raw.includes("aujourd'hui") || raw.includes("aujourdhui")) {
@@ -881,12 +888,13 @@ function parseRequestedDate(text) {
     );
     if (weekdayMatch) {
         const dow = getFrenchWeekdayIndex(weekdayMatch[1]);
-        const nextWeek = raw.includes("prochain");
+        const forceNextWeek = raw.includes("prochain");
         if (dow !== null) {
-            return buildDateAtStartOfDayISO(computeNextWeekdayDate(dow, nextWeek));
+            return buildDateAtStartOfDayISO(
+                computeNextWeekdayDate(dow, forceNextWeek)
+            );
         }
     }
-
     return null;
 }
 
@@ -1860,6 +1868,20 @@ async function proposeSlotsFromRequestedDate({
 }) {
     const searchPractitioners = getSearchPractitioners(session, cabinet);
 
+    logInfo("BOOK_REQUESTED_DATE_LOOKUP", {
+        callSid,
+        requestedDateISO,
+        preferredPractitioner: session.preferredPractitioner?.name || null,
+        practitionerPreferenceMode: session.practitionerPreferenceMode || null,
+        appointmentType: session.appointmentType || null,
+        appointmentDurationMinutes: session.appointmentDurationMinutes || null,
+        preferredTimeWindow: session.preferredTimeWindow || null,
+        preferredHourMinutes: Number.isFinite(session.preferredHourMinutes)
+            ? session.preferredHourMinutes
+            : null,
+        priorityPreference: session.priorityPreference || null,
+    });
+
     const { slots, speech: proposeSpeech, status, context } = await lookupSlotsFromDate({
         cabinet,
         practitioners: searchPractitioners,
@@ -2151,6 +2173,57 @@ async function proposeBookingSlots({
     }
 
     gather.say(SAY_OPTS, prompt);
+
+    return sendTwiml(res, vr, callSid, session);
+}
+
+function goToBookingPreferredDate(session, callSid, promptIntro = "Très bien.") {
+    session.slots = [];
+    session.pendingSlot = null;
+    session.requestedDateISO = null;
+
+    setStep(session, callSid, "BOOK_ASK_PREFERRED_DATE", {
+        trigger: "BOOKING_PREFERENCE_READY",
+        practitionerPreferenceMode: session.practitionerPreferenceMode || null,
+        preferredPractitioner: session.preferredPractitioner?.name || null,
+    });
+
+    return promptIntro;
+}
+
+async function continueBookingAfterPractitionerSelection({
+    vr,
+    res,
+    session,
+    callSid,
+    cabinet,
+    speech = "",
+    intro = "Très bien.",
+}) {
+    const requestedDateISO = parseRequestedDate(speech);
+
+    if (requestedDateISO) {
+        return proposeSlotsFromRequestedDate({
+            vr,
+            res,
+            session,
+            callSid,
+            cabinet,
+            requestedDateISO,
+            nextStep: "BOOK_PICK_SLOT",
+            intro,
+            emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
+        });
+    }
+
+    const introSpeech = goToBookingPreferredDate(session, callSid, intro);
+
+    promptAndGather(
+        vr,
+        session,
+        "Quel jour vous conviendrait ? Vous pouvez dire par exemple demain, lundi prochain, ou une date précise.",
+        introSpeech
+    );
 
     return sendTwiml(res, vr, callSid, session);
 }
@@ -2743,7 +2816,15 @@ router.post("/voice", async (req, res) => {
             }
 
             session.actionAckOverride = "";
-            return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
+            return continueBookingAfterPractitionerSelection({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet: activeCabinet,
+                speech: seed,
+                intro: "Très bien.",
+            });
         }
 
         if (session.step === "BOOK_ASK_APPOINTMENT_TYPE") {
@@ -2802,7 +2883,15 @@ router.post("/voice", async (req, res) => {
                     speech,
                 });
 
-                return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
+                return continueBookingAfterPractitionerSelection({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                    speech,
+                    intro: "Très bien.",
+                });
             }
 
             if (noPreference || yesNo === false) {
@@ -2816,7 +2905,15 @@ router.post("/voice", async (req, res) => {
                     speech,
                 });
 
-                return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
+                return continueBookingAfterPractitionerSelection({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                    speech,
+                    intro: "Très bien.",
+                });
             }
 
             if (usual) {
@@ -2880,7 +2977,15 @@ router.post("/voice", async (req, res) => {
                     speech,
                 });
 
-                return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
+                return continueBookingAfterPractitionerSelection({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                    speech,
+                    intro: "Très bien.",
+                });
             }
 
             if (noPreference) {
@@ -2894,7 +2999,15 @@ router.post("/voice", async (req, res) => {
                     speech,
                 });
 
-                return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
+                return continueBookingAfterPractitionerSelection({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                    speech,
+                    intro: "Très bien.",
+                });
             }
 
             const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_ASK_SPECIFIC_PRACTITIONER_NAME");
@@ -2923,7 +3036,15 @@ router.post("/voice", async (req, res) => {
                     speech,
                 });
 
-                return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
+                return continueBookingAfterPractitionerSelection({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                    speech,
+                    intro: "Très bien.",
+                });
             }
 
             if (noPreference) {
@@ -2937,7 +3058,15 @@ router.post("/voice", async (req, res) => {
                     speech,
                 });
 
-                return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
+                return continueBookingAfterPractitionerSelection({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                    speech,
+                    intro: "Très bien.",
+                });
             }
 
             const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_ASK_USUAL_PRACTITIONER");
@@ -3145,6 +3274,17 @@ router.post("/voice", async (req, res) => {
 
                 return proposeBookingSlots({ vr, res, session, callSid, cabinet: activeCabinet });
             }
+
+            logInfo("BOOK_REQUESTED_DATE_PARSED", {
+                callSid,
+                speech,
+                requestedDateISO,
+                preferredTimeWindow: session.preferredTimeWindow || null,
+                preferredHourMinutes: Number.isFinite(session.preferredHourMinutes)
+                    ? session.preferredHourMinutes
+                    : null,
+                priorityPreference: session.priorityPreference || null,
+            });
 
             if (!requestedDateISO) {
                 const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_ASK_PREFERRED_DATE");
