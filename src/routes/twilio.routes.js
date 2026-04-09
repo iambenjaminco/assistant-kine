@@ -2291,6 +2291,27 @@ function wantsRepeat(text) {
     );
 }
 
+function detectForgotPractitionerName(text) {
+    const t = normalizeText(text);
+    if (!t) return false;
+
+    return (
+        t.includes("je sais pas son nom") ||
+        t.includes("je ne sais pas son nom") ||
+        t.includes("j'ai oublie son nom") ||
+        t.includes("jai oublie son nom") ||
+        t.includes("j'ai oublié son nom") ||
+        t.includes("je me souviens plus de son nom") ||
+        t.includes("je ne me souviens plus de son nom") ||
+        t.includes("je sais plus comment il s'appelle") ||
+        t.includes("je ne sais plus comment il s'appelle") ||
+        t.includes("je sais plus comment il s appel") ||
+        t.includes("je ne sais plus comment il s appel") ||
+        t.includes("j'ai oublie comment il s'appelle") ||
+        t.includes("j'ai oublié comment il s'appelle")
+    );
+}
+
 function repeatCurrentPrompt(vr, session) {
     const prompt = session.lastPrompt || "Je répète.";
     const gather = gatherSpeech(vr, "/twilio/voice");
@@ -3114,6 +3135,13 @@ router.post("/voice", async (req, res) => {
         if (session.step === "BOOK_ASK_USUAL_PRACTITIONER") {
             const practitioner = findPractitionerBySpeech(speech, activeCabinet);
             const noPreference = detectNoPractitionerPreference(speech);
+
+            if (detectForgotPractitionerName(speech) || asksWhoAreThePractitioners(speech)) {
+                const gather = gatherSpeech(vr, "/twilio/voice");
+                gather.say(SAY_OPTS, buildPractitionersSpeech(activeCabinet));
+                gather.say(SAY_OPTS, "Avec quel kiné êtes-vous habituellement suivi ?");
+                return sendTwiml(res, vr, callSid, session);
+            }
 
             if (asksWhoAreThePractitioners(speech)) {
                 const gather = gatherSpeech(vr, "/twilio/voice");

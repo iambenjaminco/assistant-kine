@@ -496,6 +496,13 @@ function parseFromDateInput(fromDate, timezone = DEFAULT_TIMEZONE) {
     return new Date(raw);
 }
 
+function addDaysInTimezone(dateOrIso, days, timezone = DEFAULT_TIMEZONE) {
+    const { year, month, day } = getDatePartsInTimezone(dateOrIso, timezone);
+    const anchor = new Date(Date.UTC(year, month - 1, day, 12, 0, 0, 0));
+    anchor.setUTCDate(anchor.getUTCDate() + days);
+    return anchor;
+}
+
 function getEasterDateUTC(year) {
     const f = Math.floor;
     const a = year % 19;
@@ -985,11 +992,8 @@ function generateDynamicCandidateSlots({
     const allCandidates = [];
     const seen = new Set();
 
-    const day0 = new Date(startDate);
-
     for (let i = 0; i < days; i++) {
-        const day = new Date(day0);
-        day.setDate(day0.getDate() + i);
+        const day = addDaysInTimezone(startDate, i, timezone);
 
         const availability = getCabinetDayAvailability(day, cabinet);
         if (availability.isClosed || !availability.ranges.length) continue;
@@ -1493,8 +1497,7 @@ async function suggestTwoSlotsNext7Days({
 
     const now = new Date();
     const timeMin = new Date(now);
-    const timeMax = new Date(now);
-    timeMax.setDate(timeMax.getDate() + effectiveDays);
+    const timeMax = addDaysInTimezone(now, effectiveDays, timezone);
 
     const busyEntries = await Promise.all(
         practitioners.map(async (p) => {
@@ -1630,8 +1633,7 @@ async function suggestTwoSlotsFromDate({
         parsedStartISO: Number.isNaN(start.getTime()) ? null : start.toISOString(),
         timezone,
     });
-    const timeMax = new Date(start);
-    timeMax.setDate(timeMax.getDate() + effectiveDays);
+    const timeMax = addDaysInTimezone(start, effectiveDays, timezone);
 
     const busyEntries = await Promise.all(
         practitioners.map(async (p) => {
