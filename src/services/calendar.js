@@ -588,19 +588,103 @@ function getClosedPeriodForDate(dateKey, cabinet) {
     ) || null;
 }
 
+function getJsDowInTimezone(dateOrIso, timezone) {
+    const isoDow = getIsoDowInTimezone(dateOrIso, timezone);
+    if (!isoDow) return null;
+    return isoDow % 7; // ISO 7 (dimanche) -> JS 0
+}
+
+function normalizeDowValue(value) {
+    if (value === null || value === undefined) return null;
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+        if (value >= 1 && value <= 7) return value; // ISO
+        if (value >= 0 && value <= 6) return value === 0 ? 7 : value; // JS -> ISO
+        return null;
+    }
+
+    const raw = normalizeText(String(value));
+
+    const map = {
+        lundi: 1,
+        monday: 1,
+        mon: 1,
+
+        mardi: 2,
+        tuesday: 2,
+        tue: 2,
+        tues: 2,
+
+        mercredi: 3,
+        wednesday: 3,
+        wed: 3,
+
+        jeudi: 4,
+        thursday: 4,
+        thu: 4,
+        thur: 4,
+        thurs: 4,
+
+        vendredi: 5,
+        friday: 5,
+        fri: 5,
+
+        samedi: 6,
+        saturday: 6,
+        sat: 6,
+
+        dimanche: 7,
+        sunday: 7,
+        sun: 7,
+    };
+
+    if (map[raw]) return map[raw];
+
+    if (/^\d+$/.test(raw)) {
+        const n = Number(raw);
+        if (n >= 1 && n <= 7) return n;
+        if (n >= 0 && n <= 6) return n === 0 ? 7 : n;
+    }
+
+    return null;
+}
+
+function extractRuleDowValues(rule) {
+    if (!rule || typeof rule !== "object") return [];
+
+    const candidates = [
+        rule.dow,
+        rule.days,
+        rule.daysOfWeek,
+        rule.day,
+    ];
+
+    const values = [];
+
+    for (const candidate of candidates) {
+        if (Array.isArray(candidate)) {
+            values.push(...candidate);
+        } else if (candidate !== undefined && candidate !== null) {
+            values.push(candidate);
+        }
+    }
+
+    return values
+        .map(normalizeDowValue)
+        .filter((v) => Number.isFinite(v));
+}
+
 function getBaseOpeningRangesForDate(dateOrIso, cabinet, timezone) {
     const isoDow = getIsoDowInTimezone(dateOrIso, timezone);
-    const jsDow = getJsDowInTimezone(dateOrIso, timezone);
-
-    if (!isoDow && jsDow === null) return [];
-
     const openingHours = Array.isArray(cabinet?.openingHours)
         ? cabinet.openingHours
         : [];
 
+    if (!isoDow) return [];
+
     const rule = openingHours.find((r) => {
-        if (!Array.isArray(r?.dow)) return false;
-        return r.dow.includes(isoDow) || r.dow.includes(jsDow);
+        const dowValues = extractRuleDowValues(r);
+        return dowValues.includes(isoDow);
     });
 
     return Array.isArray(rule?.ranges) ? rule.ranges : [];

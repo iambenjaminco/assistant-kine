@@ -2291,7 +2291,7 @@ function wantsRepeat(text) {
     );
 }
 
-function detectForgotPractitionerName(text) {
+function detectForgotPractitionerIdentity(text) {
     const t = normalizeText(text);
     if (!t) return false;
 
@@ -3088,15 +3088,15 @@ router.post("/voice", async (req, res) => {
         }
 
         if (session.step === "BOOK_ASK_SPECIFIC_PRACTITIONER_NAME") {
-            const practitioner = findPractitionerBySpeech(speech, activeCabinet);
-            const noPreference = detectNoPractitionerPreference(speech);
-
-            if (asksWhoAreThePractitioners(speech)) {
+            if (detectForgotPractitionerIdentity(speech) || asksWhoAreThePractitioners(speech)) {
                 const gather = gatherSpeech(vr, "/twilio/voice");
                 gather.say(SAY_OPTS, buildPractitionersSpeech(activeCabinet));
                 gather.say(SAY_OPTS, "Quel est le nom du kiné souhaité ?");
                 return sendTwiml(res, vr, callSid, session);
             }
+
+            const practitioner = findPractitionerBySpeech(speech, activeCabinet);
+            const noPreference = detectNoPractitionerPreference(speech);
 
             if (practitioner) {
                 session.preferredPractitioner = practitioner;
