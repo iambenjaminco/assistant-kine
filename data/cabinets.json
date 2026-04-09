@@ -1,11 +1,32 @@
 {
   "cabinet_test_001": {
-    "key": "cabinet_test_001",
     "status": "active",
     "name": "Cabinet Kiné Test",
     "twilioPhoneNumber": "+33412058252",
     "smsPhoneNumber": "+33939242663",
     "timezone": "Europe/Paris",
+    "key": "cabinet_test_001",
+    "appointmentDurations": {
+      "first": 45,
+      "followUp": 30
+    },
+    "scheduling": {
+      "slotStepMinutes": 30,
+      "minLeadMinutes": 60,
+      "lookaheadDays": 7,
+      "maxSuggestions": 2
+    },
+    "openingHours": [
+      {
+        "dow": [1, 2, 3, 4, 5],
+        "ranges": [
+          { "start": "08:00", "end": "12:00" },
+          { "start": "13:00", "end": "20:00" }
+        ]
+      }
+    ],
+    "observesPublicHolidays": false,
+    "publicHolidayCountry": "FR",
     "practitioners": [
       {
         "name": "Benjamin",
