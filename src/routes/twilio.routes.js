@@ -2298,17 +2298,38 @@ function detectForgotPractitionerName(text) {
     return (
         t.includes("je sais pas son nom") ||
         t.includes("je ne sais pas son nom") ||
+        t.includes("je sais plus son nom") ||
+        t.includes("je ne sais plus son nom") ||
         t.includes("j'ai oublie son nom") ||
         t.includes("jai oublie son nom") ||
         t.includes("j'ai oublié son nom") ||
+        t.includes("j'ai oublier son nom") ||
         t.includes("je me souviens plus de son nom") ||
         t.includes("je ne me souviens plus de son nom") ||
+
+        t.includes("je sais pas son prenom") ||
+        t.includes("je ne sais pas son prenom") ||
+        t.includes("je sais plus son prenom") ||
+        t.includes("je ne sais plus son prenom") ||
+        t.includes("j'ai oublie son prenom") ||
+        t.includes("jai oublie son prenom") ||
+        t.includes("j'ai oublié son prénom") ||
+        t.includes("j'ai oublier son prénom") ||
+        t.includes("je me souviens plus de son prenom") ||
+        t.includes("je ne me souviens plus de son prénom") ||
+
+        t.includes("j'ai oublie comment il s'appelle") ||
+        t.includes("jai oublie comment il s'appelle") ||
+        t.includes("j'ai oublié comment il s'appelle") ||
+        t.includes("j'ai oublier comment il s'appelle") ||
         t.includes("je sais plus comment il s'appelle") ||
         t.includes("je ne sais plus comment il s'appelle") ||
+        t.includes("je sais pas comment il s'appelle") ||
+        t.includes("je ne sais pas comment il s'appelle") ||
         t.includes("je sais plus comment il s appel") ||
         t.includes("je ne sais plus comment il s appel") ||
-        t.includes("j'ai oublie comment il s'appelle") ||
-        t.includes("j'ai oublié comment il s'appelle")
+        t.includes("je sais pas comment il s appel") ||
+        t.includes("je ne sais pas comment il s appel")
     );
 }
 
@@ -3133,22 +3154,15 @@ router.post("/voice", async (req, res) => {
         }
 
         if (session.step === "BOOK_ASK_USUAL_PRACTITIONER") {
+            if (detectForgotPractitionerIdentity(speech) || asksWhoAreThePractitioners(speech)) {
+                const gather = gatherSpeech(vr, "/twilio/voice");
+                gather.say(SAY_OPTS, buildPractitionersSpeech(activeCabinet));
+                gather.say(SAY_OPTS, "Avec quel kiné êtes-vous habituellement suivi ?");
+                return sendTwiml(res, vr, callSid, session);
+            }
+
             const practitioner = findPractitionerBySpeech(speech, activeCabinet);
             const noPreference = detectNoPractitionerPreference(speech);
-
-            if (detectForgotPractitionerName(speech) || asksWhoAreThePractitioners(speech)) {
-                const gather = gatherSpeech(vr, "/twilio/voice");
-                gather.say(SAY_OPTS, buildPractitionersSpeech(activeCabinet));
-                gather.say(SAY_OPTS, "Avec quel kiné êtes-vous habituellement suivi ?");
-                return sendTwiml(res, vr, callSid, session);
-            }
-
-            if (asksWhoAreThePractitioners(speech)) {
-                const gather = gatherSpeech(vr, "/twilio/voice");
-                gather.say(SAY_OPTS, buildPractitionersSpeech(activeCabinet));
-                gather.say(SAY_OPTS, "Avec quel kiné êtes-vous habituellement suivi ?");
-                return sendTwiml(res, vr, callSid, session);
-            }
 
             if (practitioner) {
                 session.preferredPractitioner = practitioner;

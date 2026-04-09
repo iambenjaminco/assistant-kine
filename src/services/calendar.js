@@ -368,6 +368,12 @@ function getIsoDowInTimezone(dateOrIso, timezone) {
     return map[weekday] || null;
 }
 
+function getJsDowInTimezone(dateOrIso, timezone) {
+    const isoDow = getIsoDowInTimezone(dateOrIso, timezone);
+    if (!isoDow) return null;
+    return isoDow % 7; // ISO 7 (dimanche) -> JS 0
+}
+
 function getMinutesInTimezone(dateOrIso, timezone) {
     const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
 
@@ -584,11 +590,18 @@ function getClosedPeriodForDate(dateKey, cabinet) {
 
 function getBaseOpeningRangesForDate(dateOrIso, cabinet, timezone) {
     const isoDow = getIsoDowInTimezone(dateOrIso, timezone);
-    if (!isoDow) return [];
+    const jsDow = getJsDowInTimezone(dateOrIso, timezone);
 
-    const rule = (cabinet?.openingHours || []).find((r) =>
-        Array.isArray(r?.dow) && r.dow.includes(isoDow)
-    );
+    if (!isoDow && jsDow === null) return [];
+
+    const openingHours = Array.isArray(cabinet?.openingHours)
+        ? cabinet.openingHours
+        : [];
+
+    const rule = openingHours.find((r) => {
+        if (!Array.isArray(r?.dow)) return false;
+        return r.dow.includes(isoDow) || r.dow.includes(jsDow);
+    });
 
     return Array.isArray(rule?.ranges) ? rule.ranges : [];
 }
@@ -596,6 +609,14 @@ function getBaseOpeningRangesForDate(dateOrIso, cabinet, timezone) {
 function getCabinetDayAvailability(dateOrIso, cabinet) {
     const timezone = getTimeZoneForCabinet(cabinet);
     const dateKey = getDateKeyInTimezone(dateOrIso, timezone);
+    logInfo("DAY_AVAILABILITY_CHECK", {
+        cabinetKey: cabinet?.key || null,
+        dateKey,
+        timezone,
+        isoDow: getIsoDowInTimezone(dateOrIso, timezone),
+        jsDow: getJsDowInTimezone(dateOrIso, timezone),
+        openingHours: cabinet?.openingHours || [],
+    });
 
     const openingOverride = getOpeningOverrideForDate(dateKey, cabinet);
     if (openingOverride) {
@@ -996,6 +1017,14 @@ function generateDynamicCandidateSlots({
         const day = addDaysInTimezone(startDate, i, timezone);
 
         const availability = getCabinetDayAvailability(day, cabinet);
+        logInfo("CANDIDATE_DAY_CHECK", {
+            cabinetKey: cabinet?.key || null,
+            dayISO: day.toISOString(),
+            dayKey: getDateKeyInTimezone(day, timezone),
+            isClosed: availability.isClosed,
+            reason: availability.reason || null,
+            ranges: availability.ranges || [],
+        });
         if (availability.isClosed || !availability.ranges.length) continue;
 
         for (const range of availability.ranges) {
