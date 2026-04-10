@@ -186,8 +186,7 @@ function sayGoodbye(vr) {
 }
 
 async function clearSessionWithLog(callSid, session, reason = "UNKNOWN", meta = {}) {
-    logSessionCleared(callSid, session, reason, meta);
-
+    logSessionCleared(callSid, session, reason, meta, buildSessionSnapshot);
     try {
         await clearStoredSession(callSid);
     } catch (err) {
@@ -200,7 +199,7 @@ async function clearSessionWithLog(callSid, session, reason = "UNKNOWN", meta = 
 
 async function endCall(vr, res, callSid, session, reason, message = "", meta = {}) {
     if (message) sayFr(vr, message);
-    logCallOutcome(callSid, reason, session, meta);
+    logCallOutcome(callSid, reason, session, meta, buildSessionSnapshot);
     sayGoodbye(vr);
     await clearSessionWithLog(callSid, session, reason, meta);
     return sendTwiml(res, vr);
@@ -406,7 +405,7 @@ async function getSession(callSid) {
             throw new Error("SESSION_INIT_SAVE_FAILED");
         }
 
-        logSessionCreated(callSid, session);
+        logSessionCreated(callSid, session, buildSessionSnapshot);
     }
 
     return session;
@@ -1047,7 +1046,7 @@ async function finalizeBooking(vr, res, session, callSid, cabinet, cabinetId) {
         logCallOutcome(callSid, "BOOK_SUCCESS", session, {
             eventId: result.event?.id || null,
             slot: summarizeSlot(slot),
-        });
+        }, buildSessionSnapshot);
 
         sayFr(vr, PHRASES.confirmed || "C’est confirmé.");
         sayFr(
@@ -2383,7 +2382,7 @@ router.post("/voice", async (req, res) => {
                 logCallOutcome(callSid, "BOOK_ALT_SUCCESS", session, {
                     eventId: result.event?.id || null,
                     slot: summarizeSlot(slot),
-                });
+                }, buildSessionSnapshot);
 
                 sayFr(vr, PHRASES.confirmed || "C’est confirmé.");
                 sayFr(
@@ -2782,7 +2781,7 @@ router.post("/voice", async (req, res) => {
                 logCallOutcome(callSid, "MODIFY_NO_NEW_SLOT_FOUND", session, {
                     oldEventId: session.foundEvent?.eventId || null,
                     oldStartISO: session.foundEvent?.startISO || null,
-                });
+                }, buildSessionSnapshot);
 
                 return endCall(
                     vr,
@@ -3044,7 +3043,7 @@ router.post("/voice", async (req, res) => {
                     logCallOutcome(callSid, "MODIFY_OLD_EVENT_MISSING_AFTER_REBOOK", session, {
                         newEventId: result.event?.id || null,
                         newSlot: summarizeSlot(slot),
-                    });
+                    }, buildSessionSnapshot);
 
                     sayFr(
                         vr,
@@ -3088,7 +3087,7 @@ router.post("/voice", async (req, res) => {
                         oldCalendarId: oldEvent.calendarId,
                         newEventId: result.event?.id || null,
                         newSlot: summarizeSlot(slot),
-                    });
+                    }, buildSessionSnapshot);
 
                     sayFr(
                         vr,
@@ -3112,7 +3111,7 @@ router.post("/voice", async (req, res) => {
                     oldStartISO: session.foundEvent?.startISO || null,
                     newEventId: result.event?.id || null,
                     newSlot: summarizeSlot(slot),
-                });
+                }, buildSessionSnapshot);
 
                 sayFr(vr, "C’est modifié et confirmé.");
                 sayFr(
@@ -3514,7 +3513,7 @@ router.post("/voice", async (req, res) => {
             logCallOutcome(callSid, "CANCEL_SUCCESS", session, {
                 cancelledEventId: found.eventId,
                 cancelledStartISO: found.startISO,
-            });
+            }, buildSessionSnapshot);
 
             incrementMetric(cabinetId, "appointmentsCancelled");
             incrementMetric(cabinetId, "successfulCallFlows");
@@ -3682,7 +3681,7 @@ router.post("/voice", async (req, res) => {
         logCallOutcome(callSid, "UNEXPECTED_ERROR", session, {
             errorMessage: err?.message,
             step: session.step,
-        });
+        }, buildSessionSnapshot);
 
         return endCall(
             vr,
