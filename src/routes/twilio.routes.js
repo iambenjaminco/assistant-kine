@@ -1178,9 +1178,10 @@ async function finalizeBooking(vr, res, session, callSid, cabinet, cabinetId) {
 }
 
 router.post("/voice", async (req, res) => {
+
     const calledNumber = (req.body?.To || "").trim();
 
-    const resolvedCabinet = findCabinetByTwilioNumber(calledNumber);
+    const resolvedCabinet = await findCabinetByTwilioNumber(calledNumber);
 
     if (!resolvedCabinet) {
         logWarn("CABINET_NOT_FOUND_FROM_TWILIO_NUMBER", {
@@ -1197,9 +1198,9 @@ router.post("/voice", async (req, res) => {
 
         return sendTwiml(res, blockedVr);
     }
-    const { cabinetId, cabinet } = resolvedCabinet;
-    const billingCabinet = getCabinetBilling(cabinetId);
 
+    const { cabinetId, cabinet } = resolvedCabinet;
+    const billingCabinet = await getCabinetBilling(cabinetId);
 
     if (!billingCabinet || billingCabinet.status !== "active") {
         logWarn("CABINET_SUBSCRIPTION_INACTIVE", {
