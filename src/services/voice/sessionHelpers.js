@@ -9,8 +9,24 @@ function summarizeSlot(formatSlotFR, slot) {
     };
 }
 
-function summarizeSlots(formatSlotFR, slots) {
-    return (slots || []).map((slot) => summarizeSlot(formatSlotFR, slot));
+function summarizeSlots(slots, { formatSlotFR }) {
+    let safeSlots = [];
+
+    if (Array.isArray(slots)) {
+        safeSlots = slots;
+    } else if (slots && Array.isArray(slots.slots)) {
+        safeSlots = slots.slots;
+    } else {
+        safeSlots = [];
+    }
+
+    return safeSlots.map((slot) => ({
+        start: slot?.start || null,
+        end: slot?.end || null,
+        practitionerName: slot?.practitionerName || null,
+        calendarId: slot?.calendarId || null,
+        formattedStart: slot?.start ? formatSlotFR(slot.start) : null,
+    }));
 }
 
 function buildSessionSnapshot(session, helpers = {}) {
