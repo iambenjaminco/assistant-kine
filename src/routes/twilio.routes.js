@@ -1233,6 +1233,12 @@ router.post("/voice", async (req, res) => {
     ).trim();
     const digits = (req.body?.Digits || "").trim();
 
+    logInfo("RAW_SPEECH_DEBUG", {
+        speechResult: req.body?.SpeechResult || "",
+        unstableSpeechResult: req.body?.UnstableSpeechResult || "",
+        digits: req.body?.Digits || "",
+    });
+
     let session;
 
     try {
