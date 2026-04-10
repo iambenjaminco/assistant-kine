@@ -368,12 +368,6 @@ function getIsoDowInTimezone(dateOrIso, timezone) {
     return map[weekday] || null;
 }
 
-function getJsDowInTimezone(dateOrIso, timezone) {
-    const isoDow = getIsoDowInTimezone(dateOrIso, timezone);
-    if (!isoDow) return null;
-    return isoDow % 7; // ISO 7 (dimanche) -> JS 0
-}
-
 function getMinutesInTimezone(dateOrIso, timezone) {
     const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
 
@@ -1483,7 +1477,8 @@ async function bookAppointmentSafe({
         end.setMinutes(end.getMinutes() + effectiveMinutes);
     }
 
-    const gotLock = await acquireSlotLock(calendarId, start, end, 60_000);
+    const { ok: gotLock, token } = await acquireSlotLock(calendarId, start, end, 60_000);
+
     if (!gotLock) {
         logWarn("BOOK_SLOT_LOCKED", {
             cabinetKey: effectiveCabinet?.key || null,
@@ -1526,7 +1521,7 @@ async function bookAppointmentSafe({
 
         return { ok: true, event };
     } finally {
-        await releaseSlotLock(calendarId, start, end);
+        await releaseSlotLock(calendarId, start, end, token);
     }
 }
 
