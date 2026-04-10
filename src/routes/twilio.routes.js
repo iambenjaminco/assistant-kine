@@ -230,7 +230,21 @@ function summarizeSlot(slot) {
 }
 
 function summarizeSlots(slots) {
-    return summarizeSlotsBase(slots, { formatSlotFR });
+    const safeSlots = Array.isArray(slots) ? slots : [];
+
+    if (!Array.isArray(slots)) {
+        logWarn("SUMMARIZE_SLOTS_NON_ARRAY", {
+            receivedType: typeof slots,
+            isNull: slots == null,
+            isArray: Array.isArray(slots),
+            keys:
+                slots && typeof slots === "object"
+                    ? Object.keys(slots).slice(0, 10)
+                    : [],
+        });
+    }
+
+    return summarizeSlotsBase(safeSlots, { formatSlotFR });
 }
 
 function nextVariantIndex(session, key) {
@@ -662,7 +676,9 @@ async function proposeSlotsFromRequestedDate({
         priorityPreference: session.priorityPreference,
     });
 
-    const hydratedSlots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+    const safeSlots = Array.isArray(slots) ? slots : [];
+    const hydratedSlotsRaw = hydrateSlotsWithDefaultPractitioner(safeSlots, cabinet);
+    const hydratedSlots = Array.isArray(hydratedSlotsRaw) ? hydratedSlotsRaw : [];
 
     session.slots = hydratedSlots.slice(0, 2);
     const filtered = {
@@ -832,7 +848,10 @@ async function proposeBookingSlots({
     const resultStatus = Array.isArray(result) ? null : result?.status || null;
     const resultContext = Array.isArray(result) ? {} : result?.context || {};
 
-    const hydratedSlots = hydrateSlotsWithDefaultPractitioner(slots, cabinet);
+    const safeSlots = Array.isArray(slots) ? slots : [];
+    const hydratedSlotsRaw = hydrateSlotsWithDefaultPractitioner(safeSlots, cabinet);
+    const hydratedSlots = Array.isArray(hydratedSlotsRaw) ? hydratedSlotsRaw : [];
+
     const filtered = getFilteredSlotsResponse(
         session,
         hydratedSlots,
@@ -1096,7 +1115,10 @@ async function finalizeBooking(vr, res, session, callSid, cabinet, cabinetId) {
         priorityPreference: session.priorityPreference,
     });
 
-    const hydratedAltSlots = hydrateSlotsWithDefaultPractitioner(altSlots, cabinet);
+    const safeAltSlots = Array.isArray(altSlots) ? altSlots : [];
+    const hydratedAltSlotsRaw = hydrateSlotsWithDefaultPractitioner(safeAltSlots, cabinet);
+    const hydratedAltSlots = Array.isArray(hydratedAltSlotsRaw) ? hydratedAltSlotsRaw : [];
+
     session.slots = filterSlotsByTimePreference(
         hydratedAltSlots,
         session.preferredTimeWindow,
