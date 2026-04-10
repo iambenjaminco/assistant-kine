@@ -10,25 +10,16 @@ const {
     isExplicitDateRequest,
     cleanProposeSpeech,
     isLessThan24h,
-    detectSpecificHourPreference,
-    detectTimePreference,
-    detectPriorityPreference,
-    mentionsWholeDayScope,
     updateTimePreferenceFromSpeech,
     hasPreferenceRefinementRequest,
     parseYesNo,
     isLikelyValidPatientName,
     isPhoneConfirmationStep,
     detectExplicitPhoneRejection,
-    detectBookingIntent,
-    detectModifyIntent,
-    detectCancelIntent,
-    detectInfoIntent,
     detectActionChoice,
     detectAppointmentType,
     detectAlternativeRequest,
     normalizePhoneCandidate,
-    parseSpokenFrenchPhone,
     parsePhone,
 } = require("../services/voice/parsers");
 
@@ -63,10 +54,7 @@ const {
     setStep: setStepBase,
 } = require("../services/voice/sessionHelpers");
 
-const {
-    wantsRepeat,
-    repeatCurrentPrompt,
-} = require("../services/voice/repeat");
+const { wantsRepeat } = require("../services/voice/repeat");
 
 const {
     maskSpeech,
@@ -294,6 +282,14 @@ function promptAndGather(vr, session, prompt, intro = "") {
     return gather;
 }
 
+function repeatLastPrompt(vr, session) {
+    const prompt = session.lastPrompt || "Je répète.";
+    const gather = gatherSpeech(vr, "/twilio/voice");
+    gather.say(SAY_OPTS, "Je répète.");
+    gather.say(SAY_OPTS, prompt);
+    return gather;
+}
+
 function getCabinetOrFail(vr, cabinet) {
     if (!cabinet) {
         sayFr(vr, "Aucun cabinet n'est associé à ce numéro.");
@@ -405,7 +401,7 @@ async function getSession(callSid) {
             throw new Error("SESSION_INIT_SAVE_FAILED");
         }
 
-        logSessionCreated(callSid, session, buildSessionSnapshot);
+        logSessionCreated(callSid, session, {}, buildSessionSnapshot);
     }
 
     return session;
@@ -480,12 +476,6 @@ function askActionMenu(vr, session, intro = "") {
 
     gather.say(SAY_OPTS, prompt);
     return gather;
-}
-
-function formatPhoneForSpeech(phone) {
-    const digits = normalizePhoneCandidate(phone);
-    if (!digits) return "";
-    return digits.match(/.{1,2}/g).join(" ");
 }
 
 
@@ -574,24 +564,64 @@ function getFilteredSlotsResponse(session, slots, fallbackPrompt) {
     };
 }
 
-function saySlots(vr, session, slots) {
+function saySlotsOnNode(node, slots) {
     const a = slots?.[0];
     const b = slots?.[1] || slots?.[0];
 
     if (!a) return;
 
-    sayFr(
-        vr,
-        `Je peux vous proposer ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""
-        }.`
+    node.say(
+        SAY_OPTS,
+        `Je peux vous proposer ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""}.`
     );
 
-    if (b?.start && b.start !== a.start) {
-        sayFr(
-            vr,
-            `Ou ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""
-            }.`
+    if (b && b.start !== a.start) {
+        node.say(
+            SAY_OPTS,
+            `Ou ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""}.`
         );
+    }
+}
+
+async function sendSmsWithLogging({
+    sender,
+    payload,
+    timeoutLabel,
+    logType,
+    callSid,
+    cabinetId,
+    step,
+    to,
+}) {
+    try {
+        const sms = await withTimeout(
+            sender(payload),
+            8000,
+            timeoutLabel
+        );
+
+        logInfo("SMS_SENT", {
+            callSid,
+            cabinetId,
+            step: step || null,
+            type: logType,
+            to: maskPhone(to),
+            sid: sms?.sid || null,
+            status: sms?.status || null,
+        });
+
+        return { ok: true, sms };
+    } catch (err) {
+        logError("SMS_FAILED", {
+            callSid,
+            cabinetId,
+            step: step || null,
+            type: logType,
+            to: maskPhone(to),
+            message: err?.message,
+        });
+
+        return { ok: false, error: err };
     }
 }
 
@@ -735,22 +765,7 @@ async function proposeSlotsFromRequestedDate({
     ) {
         gather.say(SAY_OPTS, cleaned);
     } else {
-        const a = session.slots?.[0];
-        const b = session.slots?.[1] || session.slots?.[0];
-
-        if (a) {
-            gather.say(
-                SAY_OPTS,
-                `Je peux vous proposer ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""}.`
-            );
-        }
-
-        if (b && b.start !== a.start) {
-            gather.say(
-                SAY_OPTS,
-                `Ou ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""}.`
-            );
-        }
+        saySlotsOnNode(gather, session.slots);
     }
 
     gather.say(SAY_OPTS, prompt);
@@ -898,22 +913,7 @@ async function proposeBookingSlots({
     ) {
         gather.say(SAY_OPTS, cleaned);
     } else {
-        const a = session.slots?.[0];
-        const b = session.slots?.[1] || session.slots?.[0];
-
-        if (a) {
-            gather.say(
-                SAY_OPTS,
-                `Je peux vous proposer ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""}.`
-            );
-        }
-
-        if (b && b.start !== a.start) {
-            gather.say(
-                SAY_OPTS,
-                `Ou ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""}.`
-            );
-        }
+        saySlotsOnNode(gather, session.slots);
     }
 
     gather.say(SAY_OPTS, prompt);
@@ -1054,37 +1054,21 @@ async function finalizeBooking(vr, res, session, callSid, cabinet, cabinetId) {
             `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""}.`
         );
 
-        try {
-            const sms = await withTimeout(
-                sendAppointmentConfirmationSMS({
-                    to: session.phone,
-                    patientName: session.patientName || "Patient",
-                    formattedSlot: formatSlotFR(slot.start),
-                    practitionerName: slot.practitionerName || "",
-                }),
-                8000,
-                "SEND_BOOK_CONFIRMATION_SMS"
-            );
-
-            logInfo("SMS_SENT", {
-                callSid,
-                cabinetId,
-                step: session?.step || null,
-                type: "BOOK_CONFIRMATION",
-                to: maskPhone(session.phone),
-                sid: sms?.sid || null,
-                status: sms?.status || null,
-            });
-        } catch (smsErr) {
-            logError("SMS_FAILED", {
-                callSid,
-                cabinetId,
-                step: session?.step || null,
-                type: "BOOK_CONFIRMATION",
-                to: maskPhone(session.phone),
-                message: smsErr?.message,
-            });
-        }
+        await sendSmsWithLogging({
+            sender: sendAppointmentConfirmationSMS,
+            payload: {
+                to: session.phone,
+                patientName: session.patientName || "Patient",
+                formattedSlot: formatSlotFR(slot.start),
+                practitionerName: slot.practitionerName || "",
+            },
+            timeoutLabel: "SEND_BOOK_CONFIRMATION_SMS",
+            logType: "BOOK_CONFIRMATION",
+            callSid,
+            cabinetId,
+            step: session?.step,
+            to: session.phone,
+        });
 
         sayGoodbye(vr);
         await clearSessionWithLog(callSid, session, "BOOK_SUCCESS", {
@@ -1155,22 +1139,7 @@ async function finalizeBooking(vr, res, session, callSid, cabinet, cabinetId) {
     gather.say(SAY_OPTS, statusMsg);
     gather.say(SAY_OPTS, "Je peux vous proposer un autre créneau.");
 
-    const a = session.slots?.[0];
-    const b = session.slots?.[1] || session.slots?.[0];
-
-    if (a) {
-        gather.say(
-            SAY_OPTS,
-            `Je peux vous proposer ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""}.`
-        );
-    }
-
-    if (b && b.start !== a.start) {
-        gather.say(
-            SAY_OPTS,
-            `Ou ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""}.`
-        );
-    }
+    saySlotsOnNode(gather, session.slots);
 
     gather.say(SAY_OPTS, prompt);
 
@@ -1291,7 +1260,7 @@ router.post("/voice", async (req, res) => {
     const normalizedSpeech = normalizeText(speech);
 
     if (hasInput && wantsRepeat(normalizedSpeech) && session.step !== "ACTION") {
-        repeatCurrentPrompt(vr, session);
+        repeatLastPrompt(vr, session);
         return sendTwiml(res, vr, callSid, session);
     }
 
@@ -1891,19 +1860,7 @@ router.post("/voice", async (req, res) => {
                 const gather = gatherSpeech(vr, "/twilio/voice");
                 gather.say(SAY_OPTS, "Je répète.");
 
-                const secondSlot = session.slots?.[1] || session.slots?.[0];
-
-                gather.say(
-                    SAY_OPTS,
-                    `Je peux vous proposer ${formatSlotFR(firstSlot.start)}${firstSlot.practitionerName ? ` avec ${firstSlot.practitionerName}` : ""}.`
-                );
-
-                if (secondSlot && secondSlot.start !== firstSlot.start) {
-                    gather.say(
-                        SAY_OPTS,
-                        `Ou ${formatSlotFR(secondSlot.start)}${secondSlot.practitionerName ? ` avec ${secondSlot.practitionerName}` : ""}.`
-                    );
-                }
+                saySlotsOnNode(gather, session.slots);
 
                 gather.say(SAY_OPTS, prompt);
 
@@ -2390,37 +2347,21 @@ router.post("/voice", async (req, res) => {
                     `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""}.`
                 );
 
-                try {
-                    const sms = await withTimeout(
-                        sendAppointmentConfirmationSMS({
-                            to: session.phone,
-                            patientName: session.patientName || "Patient",
-                            formattedSlot: formatSlotFR(slot.start),
-                            practitionerName: slot.practitionerName || "",
-                        }),
-                        8000,
-                        "SEND_BOOK_CONFIRMATION_SMS"
-                    );
-
-                    logInfo("SMS_SENT", {
-                        callSid,
-                        cabinetId,
-                        step: session?.step || null,
-                        type: "BOOK_CONFIRMATION_ALT",
-                        to: maskPhone(session.phone),
-                        sid: sms?.sid || null,
-                        status: sms?.status || null,
-                    });
-                } catch (smsErr) {
-                    logError("SMS_FAILED", {
-                        callSid,
-                        cabinetId,
-                        step: session?.step || null,
-                        type: "BOOK_CONFIRMATION_ALT",
-                        to: maskPhone(session.phone),
-                        message: smsErr?.message,
-                    });
-                }
+                await sendSmsWithLogging({
+                    sender: sendAppointmentConfirmationSMS,
+                    payload: {
+                        to: session.phone,
+                        patientName: session.patientName || "Patient",
+                        formattedSlot: formatSlotFR(slot.start),
+                        practitionerName: slot.practitionerName || "",
+                    },
+                    timeoutLabel: "SEND_BOOK_CONFIRMATION_SMS",
+                    logType: "BOOK_CONFIRMATION",
+                    callSid,
+                    cabinetId,
+                    step: session?.step,
+                    to: session.phone,
+                });
 
                 sayGoodbye(vr);
                 await clearSessionWithLog(callSid, session, "BOOK_ALT_SUCCESS", {
@@ -2826,22 +2767,7 @@ router.post("/voice", async (req, res) => {
             ) {
                 gather.say(SAY_OPTS, cleaned);
             } else {
-                const a = session.slots?.[0];
-                const b = session.slots?.[1] || session.slots?.[0];
-
-                if (a) {
-                    gather.say(
-                        SAY_OPTS,
-                        `Je peux vous proposer ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""}.`
-                    );
-                }
-
-                if (b && b.start !== a.start) {
-                    gather.say(
-                        SAY_OPTS,
-                        `Ou ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""}.`
-                    );
-                }
+                saySlotsOnNode(gather, session.slots);
             }
 
             gather.say(SAY_OPTS, prompt);
@@ -3119,37 +3045,21 @@ router.post("/voice", async (req, res) => {
                     `${formatSlotFR(slot.start)}${slot.practitionerName ? ` avec ${slot.practitionerName}` : ""}.`
                 );
 
-                try {
-                    const sms = await withTimeout(
-                        sendAppointmentModifiedSMS({
-                            to: session.phone,
-                            patientName: session.patientName || "Patient",
-                            formattedSlot: formatSlotFR(slot.start),
-                            practitionerName: slot.practitionerName || "",
-                        }),
-                        8000,
-                        "SEND_MODIFY_CONFIRMATION_SMS"
-                    );
-
-                    logInfo("SMS_SENT", {
-                        callSid,
-                        cabinetId,
-                        step: session?.step || null,
-                        type: "MODIFY_CONFIRMATION",
-                        to: maskPhone(session.phone),
-                        sid: sms?.sid || null,
-                        status: sms?.status || null,
-                    });
-                } catch (smsErr) {
-                    logError("SMS_FAILED", {
-                        callSid,
-                        cabinetId,
-                        step: session?.step || null,
-                        type: "MODIFY_CONFIRMATION",
-                        to: maskPhone(session.phone),
-                        message: smsErr?.message,
-                    });
-                }
+                await sendSmsWithLogging({
+                    sender: sendAppointmentModifiedSMS,
+                    payload: {
+                        to: session.phone,
+                        patientName: session.patientName || "Patient",
+                        formattedSlot: formatSlotFR(slot.start),
+                        practitionerName: slot.practitionerName || "",
+                    },
+                    timeoutLabel: "SEND_MODIFY_CONFIRMATION_SMS",
+                    logType: "MODIFY_CONFIRMATION",
+                    callSid,
+                    cabinetId,
+                    step: session?.step,
+                    to: session.phone,
+                });
 
                 sayGoodbye(vr);
                 await clearSessionWithLog(callSid, session, "MODIFY_SUCCESS", {
@@ -3477,39 +3387,22 @@ router.post("/voice", async (req, res) => {
                 );
             }
 
-            try {
-                const sms = await withTimeout(
-                    sendAppointmentCancelledSMS({
-                        to: session.phone,
-                        patientName: session.patientName || "Patient",
-                        formattedSlot: formatSlotFR(found.startISO),
-                        practitionerName:
-                            activeCabinet.practitioners.find((p) => p.calendarId === found.calendarId)?.name || "",
-                    }),
-                    8000,
-                    "SEND_CANCEL_CONFIRMATION_SMS"
-                );
-
-                logInfo("SMS_SENT", {
-                    callSid,
-                    cabinetId,
-                    step: session?.step || null,
-                    type: "CANCEL_CONFIRMATION",
-                    to: maskPhone(session.phone),
-                    sid: sms?.sid || null,
-                    status: sms?.status || null,
-                });
-            } catch (smsErr) {
-                logError("SMS_FAILED", {
-                    callSid,
-                    cabinetId,
-                    step: session?.step || null,
-                    type: "CANCEL_CONFIRMATION",
-                    to: maskPhone(session.phone),
-                    message: smsErr?.message,
-                });
-
-            }
+            await sendSmsWithLogging({
+                sender: sendAppointmentCancelledSMS,
+                payload: {
+                    to: session.phone,
+                    patientName: session.patientName || "Patient",
+                    formattedSlot: formatSlotFR(found.startISO),
+                    practitionerName:
+                        activeCabinet.practitioners.find((p) => p.calendarId === found.calendarId)?.name || "",
+                },
+                timeoutLabel: "SEND_CANCEL_CONFIRMATION_SMS",
+                logType: "CANCEL_CONFIRMATION",
+                callSid,
+                cabinetId,
+                step: session?.step,
+                to: session.phone,
+            });
             logCallOutcome(callSid, "CANCEL_SUCCESS", session, {
                 cancelledEventId: found.eventId,
                 cancelledStartISO: found.startISO,
