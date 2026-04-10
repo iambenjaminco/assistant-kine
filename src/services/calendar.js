@@ -670,11 +670,22 @@ function extractRuleDowValues(rule) {
 
 function getBaseOpeningRangesForDate(dateOrIso, cabinet, timezone) {
     const isoDow = getIsoDowInTimezone(dateOrIso, timezone);
+
     const openingHours = Array.isArray(cabinet?.openingHours)
         ? cabinet.openingHours
-        : [];
+        : Array.isArray(cabinet?.scheduling?.openingHours)
+            ? cabinet.scheduling.openingHours
+            : [];
 
     if (!isoDow) return [];
+
+    logInfo("OPENING_HOURS_SOURCE", {
+        cabinetKey: cabinet?.key || null,
+        hasRootOpeningHours: Array.isArray(cabinet?.openingHours),
+        hasSchedulingOpeningHours: Array.isArray(cabinet?.scheduling?.openingHours),
+        openingHoursCount: openingHours.length,
+        isoDow,
+    });
 
     const rule = openingHours.find((r) => {
         const dowValues = extractRuleDowValues(r);
