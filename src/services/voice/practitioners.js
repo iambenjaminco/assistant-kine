@@ -1,4 +1,6 @@
-function detectNoPractitionerPreference(normalizeText, text) {
+const { normalizeText } = require("./parsers");
+
+function detectNoPractitionerPreference(text) {
     const t = normalizeText(text);
     return (
         t.includes("peu importe") ||
@@ -15,7 +17,7 @@ function detectNoPractitionerPreference(normalizeText, text) {
     );
 }
 
-function detectUsualPractitionerIntent(normalizeText, text) {
+function detectUsualPractitionerIntent(text) {
     const t = normalizeText(text);
     return (
         t.includes("mon kine habituel") ||
@@ -29,7 +31,7 @@ function detectUsualPractitionerIntent(normalizeText, text) {
     );
 }
 
-function findPractitionerBySpeech(normalizeText, text, cabinet) {
+function findPractitionerBySpeech(text, cabinet) {
     const t = normalizeText(text);
     if (!t || !cabinet?.practitioners?.length) return null;
 
@@ -55,7 +57,7 @@ function getSearchPractitioners(session, cabinet) {
     return cabinet.practitioners;
 }
 
-function asksWhoAreThePractitioners(normalizeText, text) {
+function asksWhoAreThePractitioners(text) {
     const t = normalizeText(text);
     if (!t) return false;
 
@@ -73,7 +75,7 @@ function asksWhoAreThePractitioners(normalizeText, text) {
     );
 }
 
-function detectForgotPractitionerIdentity(normalizeText, text) {
+function detectForgotPractitionerIdentity(text) {
     const t = normalizeText(text);
     if (!t) return false;
 
@@ -88,7 +90,6 @@ function detectForgotPractitionerIdentity(normalizeText, text) {
         t.includes("j'ai oublier son nom") ||
         t.includes("je me souviens plus de son nom") ||
         t.includes("je ne me souviens plus de son nom") ||
-
         t.includes("je sais pas son prenom") ||
         t.includes("je ne sais pas son prenom") ||
         t.includes("je sais plus son prenom") ||
@@ -99,7 +100,6 @@ function detectForgotPractitionerIdentity(normalizeText, text) {
         t.includes("j'ai oublier son prénom") ||
         t.includes("je me souviens plus de son prenom") ||
         t.includes("je ne me souviens plus de son prénom") ||
-
         t.includes("j'ai oublie comment il s'appelle") ||
         t.includes("jai oublie comment il s'appelle") ||
         t.includes("j'ai oublié comment il s'appelle") ||
