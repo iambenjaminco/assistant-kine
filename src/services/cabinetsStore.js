@@ -15,6 +15,7 @@ function mapDbCabinetToApp(row) {
     name: row.name || "",
     status: row.status || null,
     timezone: row.timezone || "Europe/Paris",
+
     practitioners: practitioners.filter(
       (p) =>
         p &&
@@ -27,6 +28,27 @@ function mapDbCabinetToApp(row) {
 
     twilioPhoneNumber: row.twilio_phone_number || "",
     smsPhoneNumber: row.sms_phone_number || "",
+
+    appointmentDurations:
+      row.appointment_durations &&
+      typeof row.appointment_durations === "object" &&
+      !Array.isArray(row.appointment_durations)
+        ? row.appointment_durations
+        : {},
+
+    scheduling:
+      row.scheduling &&
+      typeof row.scheduling === "object" &&
+      !Array.isArray(row.scheduling)
+        ? row.scheduling
+        : {},
+
+    openingHours: Array.isArray(row.opening_hours)
+      ? row.opening_hours
+      : [],
+
+    observesPublicHolidays: Boolean(row.observes_public_holidays),
+    publicHolidayCountry: row.public_holiday_country || "FR",
 
     stripeCustomerId: row.stripe_customer_id || null,
     stripeSubscriptionId: row.stripe_subscription_id || null,
@@ -64,6 +86,25 @@ function mapAppUpdatesToDb(cabinetId, updates = {}) {
     stripe_subscription_id:
       updates.stripeSubscriptionId ??
       updates.stripe_subscription_id,
+
+    appointment_durations:
+      updates.appointmentDurations ??
+      updates.appointment_durations,
+
+    scheduling:
+      updates.scheduling,
+
+    opening_hours:
+      updates.openingHours ??
+      updates.opening_hours,
+
+    observes_public_holidays:
+      updates.observesPublicHolidays ??
+      updates.observes_public_holidays,
+
+    public_holiday_country:
+      updates.publicHolidayCountry ??
+      updates.public_holiday_country,
   };
 }
 
