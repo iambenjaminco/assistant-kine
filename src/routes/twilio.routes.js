@@ -159,12 +159,13 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
         language: "fr-FR",
         speechModel: "phone_call",
         speechTimeout: "auto",
-        timeout: 8,
+        timeout: 10,
         actionOnEmptyResult: true,
+        bargeIn: true,
         action: actionUrl,
         method: "POST",
         hints:
-            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, information, renseignements, adresse, horaires, horaire, ouverture, fermeture, ouvert, ferme, localisation, ou se trouve le cabinet, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee",
+            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, information, renseignements, adresse, horaires, horaire, ouverture, fermeture, ouvert, ferme, localisation, ou se trouve le cabinet, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, lundi prochain, mardi prochain, mercredi prochain, jeudi prochain, vendredi prochain, semaine prochaine, le 18 mars, le 20 avril, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee",
         ...overrides,
     });
 }
@@ -287,11 +288,11 @@ function promptAndGather(vr, session, prompt, intro = "") {
     const gather = gatherSpeech(vr, "/twilio/voice");
 
     if (intro) {
-        gather.say(SAY_OPTS, intro);
+        sayFr(gather, intro);
     }
 
     if (session.lastPrompt) {
-        gather.say(SAY_OPTS, session.lastPrompt);
+        sayFr(gather, session.lastPrompt);
     }
 
     return gather;
@@ -300,8 +301,8 @@ function promptAndGather(vr, session, prompt, intro = "") {
 function repeatLastPrompt(vr, session) {
     const prompt = session.lastPrompt || "Je répète.";
     const gather = gatherSpeech(vr, "/twilio/voice");
-    gather.say(SAY_OPTS, "Je répète.");
-    gather.say(SAY_OPTS, prompt);
+    sayFr(gather, "Je répète.");
+    sayFr(gather, prompt);
     return gather;
 }
 
@@ -1283,6 +1284,15 @@ router.post("/voice", async (req, res) => {
 
     const activeCabinet = validatedCabinet;
     const durations = getCabinetDurations(activeCabinet);
+    logInfo("ACTIVE_CABINET_DEBUG", {
+        callSid,
+        cabinetId,
+        cabinetKey: activeCabinet?.key || null,
+        hasOpeningHours: Array.isArray(activeCabinet?.openingHours),
+        openingHours: activeCabinet?.openingHours || null,
+        hasSchedulingOpeningHours: Array.isArray(activeCabinet?.scheduling?.openingHours),
+        schedulingOpeningHours: activeCabinet?.scheduling?.openingHours || null,
+    });
 
     const hasInput = Boolean(speech || digits);
     const normalizedSpeech = normalizeText(speech);
