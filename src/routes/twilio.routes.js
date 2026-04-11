@@ -155,17 +155,32 @@ function sayFr(node, text) {
 
 function gatherSpeech(vr, actionUrl, overrides = {}) {
     return vr.gather({
-        input: "speech",
+        input: "speech dtmf",
         language: "fr-FR",
         speechModel: "phone_call",
-        speechTimeout: "auto",
+        speechTimeout: 2,
         timeout: 10,
         actionOnEmptyResult: true,
-        bargeIn: true,
         action: actionUrl,
         method: "POST",
         hints:
-            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, information, renseignements, adresse, horaires, horaire, ouverture, fermeture, ouvert, ferme, localisation, ou se trouve le cabinet, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, lundi prochain, mardi prochain, mercredi prochain, jeudi prochain, vendredi prochain, semaine prochaine, le 18 mars, le 20 avril, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee",
+            "prendre rendez-vous, modifier rendez-vous, annuler rendez-vous, information, adresse, horaires, oui, non, demain, apres-demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, dimanche, lundi prochain, mardi prochain, mercredi prochain, jeudi prochain, vendredi prochain, samedi prochain, dimanche prochain, aujourd'hui, 1, 2, 3, 4",
+        ...overrides,
+    });
+}
+
+function gatherDateSpeech(vr, actionUrl, overrides = {}) {
+    return vr.gather({
+        input: "speech dtmf",
+        language: "fr-FR",
+        speechModel: "phone_call",
+        speechTimeout: 2,
+        timeout: 12,
+        actionOnEmptyResult: true,
+        action: actionUrl,
+        method: "POST",
+        hints:
+            "aujourd'hui, demain, apres-demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, dimanche, lundi prochain, mardi prochain, mercredi prochain, jeudi prochain, vendredi prochain, samedi prochain, dimanche prochain, le 10 avril, le 11 avril, le 12 avril, le 13 avril, le matin, en fin de matinée, l'après-midi, en fin d'après-midi, vers 17h, vers 18h",
         ...overrides,
     });
 }
@@ -293,6 +308,24 @@ function promptAndGather(vr, session, prompt, intro = "") {
 
     if (session.lastPrompt) {
         sayFr(gather, session.lastPrompt);
+    }
+
+    return gather;
+}
+
+function promptAndGatherDate(vr, session, prompt, intro = "") {
+    if (typeof prompt === "string") {
+        setPrompt(session, prompt);
+    }
+
+    const gather = gatherDateSpeech(vr, "/twilio/voice");
+
+    if (intro) {
+        gather.say(SAY_OPTS, intro);
+    }
+
+    if (session.lastPrompt) {
+        gather.say(SAY_OPTS, session.lastPrompt);
     }
 
     return gather;
@@ -741,7 +774,7 @@ async function proposeSlotsFromRequestedDate({
                 "Donnez-moi un autre horaire ou un autre jour qui vous conviendrait.";
         }
 
-        promptAndGather(
+        promptAndGatherDate(
             vr,
             session,
             noAvailabilityPrompt,
@@ -903,7 +936,7 @@ async function proposeBookingSlots({
         setStep(session, callSid, "BOOK_ASK_PREFERRED_DATE", {
             trigger: "NO_BOOKING_SLOT_FOUND",
         });
-        promptAndGather(vr, session, followUpPrompt);
+        promptAndGatherDate(vr, session, followUpPrompt);
         return sendTwiml(res, vr, callSid, session);
     }
 
@@ -982,7 +1015,7 @@ async function continueBookingAfterPractitionerSelection({
 
     const introSpeech = goToBookingPreferredDate(session, callSid, intro);
 
-    promptAndGather(
+    promptAndGatherDate(
         vr,
         session,
         "Quel jour vous conviendrait ?",
@@ -2073,10 +2106,10 @@ router.post("/voice", async (req, res) => {
                 const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_ASK_PREFERRED_DATE");
                 if (retry) return retry;
 
-                promptAndGather(
+                promptAndGatherDate(
                     vr,
                     session,
-                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple demain, lundi prochain, ou une date précise."
+                    "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple demain, lundi prochain, mardi après-midi, ou une date précise."
                 );
                 return sendTwiml(res, vr, callSid, session);
             }
