@@ -783,6 +783,7 @@ module.exports = {
     detectInfoIntent,
     detectActionChoice,
     detectAppointmentType,
+    detectAlternativeRequest,
     normalizePhoneCandidate,
     parseSpokenFrenchPhone,
     parsePhone,
