@@ -1,7 +1,7 @@
 const supabase = require("../config/supabase");
 
 function normalizePhone(value) {
-  return String(value || "").replace(/\s+/g, "").trim();
+  return String(value || "").replace(/\D/g, "");
 }
 
 function mapDbCabinetToApp(row) {
@@ -29,17 +29,20 @@ function mapDbCabinetToApp(row) {
     twilioPhoneNumber: row.twilio_phone_number || "",
     smsPhoneNumber: row.sms_phone_number || "",
 
+    addressSpeech: row.address_speech || "",
+    hoursSpeech: row.hours_speech || "",
+
     appointmentDurations:
       row.appointment_durations &&
-      typeof row.appointment_durations === "object" &&
-      !Array.isArray(row.appointment_durations)
+        typeof row.appointment_durations === "object" &&
+        !Array.isArray(row.appointment_durations)
         ? row.appointment_durations
         : {},
 
     scheduling:
       row.scheduling &&
-      typeof row.scheduling === "object" &&
-      !Array.isArray(row.scheduling)
+        typeof row.scheduling === "object" &&
+        !Array.isArray(row.scheduling)
         ? row.scheduling
         : {},
 
@@ -58,6 +61,13 @@ function mapDbCabinetToApp(row) {
 }
 
 function mapAppUpdatesToDb(cabinetId, updates = {}) {
+  const rawPhone =
+    updates.twilioPhoneNumber ??
+    updates.twilio_phone_number;
+
+  const normalizedPhone =
+    rawPhone !== undefined ? normalizePhone(rawPhone) : undefined;
+
   return {
     id: cabinetId,
 
@@ -71,9 +81,8 @@ function mapAppUpdatesToDb(cabinetId, updates = {}) {
         ? []
         : undefined,
 
-    twilio_phone_number:
-      updates.twilioPhoneNumber ??
-      updates.twilio_phone_number,
+    twilio_phone_number: rawPhone,
+    twilio_phone_number_normalized: normalizedPhone,
 
     sms_phone_number:
       updates.smsPhoneNumber ??
@@ -163,7 +172,7 @@ async function upsertCabinet(cabinetId, updates = {}) {
       message: error.message,
       payload,
     });
-    return null;
+    throw new Error("UPSERT_CABINET_FAILED");
   }
 
   return mapDbCabinetToApp(data);
@@ -180,7 +189,9 @@ async function findCabinetByTwilioNumber(twilioNumber) {
 
   const { data, error } = await supabase
     .from("cabinets")
-    .select("*");
+    .select("*")
+    .eq("twilio_phone_number_normalized", normalized)
+    .maybeSingle();
 
   if (error) {
     console.error("[CABINETS_STORE][FIND_BY_TWILIO_ERROR]", {
@@ -190,16 +201,11 @@ async function findCabinetByTwilioNumber(twilioNumber) {
     return null;
   }
 
-  const found = (data || []).find((row) => {
-    const dbPhone = normalizePhone(row.twilio_phone_number);
-    return dbPhone && dbPhone === normalized;
-  });
-
-  if (!found) return null;
+  if (!data) return null;
 
   return {
-    cabinetId: found.id,
-    cabinet: mapDbCabinetToApp(found),
+    cabinetId: data.id,
+    cabinet: mapDbCabinetToApp(data),
   };
 }
 

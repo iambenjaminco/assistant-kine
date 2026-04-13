@@ -1205,7 +1205,10 @@ function parseTargetHourMinutes(text = "") {
         const quarterLessMatch = t.match(/\b(\d{1,2})\s*h\b/);
         if (quarterLessMatch) {
             const hour = Number(quarterLessMatch[1]);
-            if (Number.isFinite(hour)) return hour * 60 - 15;
+            if (Number.isFinite(hour)) {
+                const minutes = hour * 60 - 15;
+                return minutes >= 0 ? minutes : null;
+            }
         }
     }
 
@@ -1397,6 +1400,8 @@ async function createAppointment({
     const endIso = end.toISOString();
     const safePatientName = String(patientName || "").trim() || "Patient";
 
+    const bookingRef = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
     const lines = [
         reason || "Rendez-vous kiné",
         `Patient : ${safePatientName}`,
@@ -1404,6 +1409,7 @@ async function createAppointment({
         ...(appointmentType ? [`Type : ${appointmentType}`] : []),
         `Durée : ${effectiveDurationMinutes} min`,
         ...(cabinet?.key ? [`Cabinet : ${cabinet.key}`] : []),
+        `BookingRef : ${bookingRef}`, // ✅ AJOUT
         "Origine : Assistant vocal SaaS",
         "Canal : Téléphone",
     ];
@@ -2053,7 +2059,7 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
                 timeMin,
                 singleEvents: true,
                 orderBy: "startTime",
-                maxResults: 250,
+                maxResults: 50,
                 pageToken,
             });
 
@@ -2093,6 +2099,25 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
                 const candTime = new Date(candidate.startISO).getTime();
 
                 if (candTime < bestTime) best = candidate;
+
+                // ✅ optimisation : si on a déjà un RDV très proche (dans <2h), on arrête
+                if (best) {
+                    const nowTime = new Date().getTime();
+                    if (new Date(best.startISO).getTime() - nowTime < 2 * 60 * 60 * 1000) {
+                        return {
+                            calendarId: best.calendarId,
+                            eventId: best.eventId,
+                            startISO: best.startISO,
+                            endISO: best.endISO,
+                            summary: best.summary,
+                            patientName: best.patientName,
+                            appointmentType: best.appointmentType,
+                            durationMinutes: best.durationMinutes,
+                            timezone,
+                            cabinetKey: cabinet?.key || null,
+                        };
+                    }
+                }
             }
 
             pageToken = res.data.nextPageToken || undefined;
@@ -2153,18 +2178,34 @@ async function cancelAppointmentSafe({ calendarId, eventId }) {
             calendarId,
             eventId,
         });
-        return { ok: true };
+
+        return { ok: true, deleted: true };
     } catch (error) {
+        const message = error?.message || "";
+
+        // ✅ Cas déjà supprimé / introuvable
+        if (
+            message.includes("Not Found") ||
+            message.includes("404")
+        ) {
+            logWarn("DELETE_ALREADY_DONE", {
+                calendarId,
+                eventId,
+            });
+
+            return { ok: true, deleted: false, alreadyDeleted: true };
+        }
+
         logError("DELETE_FAILED", {
             calendarId,
             eventId,
-            message: error?.message,
+            message,
         });
 
         return {
             ok: false,
             code: "DELETE_FAILED",
-            message: error?.message || "Impossible de supprimer le rendez-vous",
+            message,
         };
     }
 }
