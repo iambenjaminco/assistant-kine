@@ -4,6 +4,7 @@
     "name": "Cabinet Kiné Test",
     "twilioPhoneNumber": "+33412058252",
     "smsPhoneNumber": "+33939242663",
+    "transferPhoneNumber": "+33632855885",
     "timezone": "Europe/Paris",
     "key": "cabinet_test_001",
     "appointmentDurations": {

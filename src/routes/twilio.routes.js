@@ -164,7 +164,7 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
         action: actionUrl,
         method: "POST",
         hints:
-            "prendre rendez-vous, modifier rendez-vous, annuler rendez-vous, information, adresse, horaires, oui, non, demain, apres-demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, dimanche, lundi prochain, mardi prochain, mercredi prochain, jeudi prochain, vendredi prochain, samedi prochain, dimanche prochain, aujourd'hui, 1, 2, 3, 4",
+            "prendre rendez-vous, modifier rendez-vous, annuler rendez-vous, autre, urgence, question, adresse, horaires, oui, non, demain, apres-demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, dimanche, lundi prochain, mardi prochain, mercredi prochain, jeudi prochain, vendredi prochain, samedi prochain, dimanche prochain, aujourd'hui, 1, 2, 3, 4",
         ...overrides,
     });
 }
@@ -236,6 +236,65 @@ function gatherDateSpeech(vr, actionUrl, overrides = {}) {
 function sayGoodbye(vr) {
     sayFr(vr, PHRASES.goodbye || "À bientôt. Au revoir.");
     vr.hangup();
+}
+
+function detectOtherRequest(text = "", digits = "") {
+    const t = normalizeText(text);
+
+    return (
+        digits === "4" ||
+        t.includes("autre") ||
+        t.includes("autre demande") ||
+        t.includes("autre chose") ||
+        t.includes("j'ai une autre demande") ||
+        t.includes("j ai une autre demande") ||
+        t.includes("question")
+    );
+}
+
+function detectUrgencyRequest(text = "") {
+    const t = normalizeText(text);
+
+    return (
+        t.includes("urgence") ||
+        t.includes("urgent") ||
+        t.includes("c'est urgent") ||
+        t.includes("c est urgent") ||
+        t.includes("douleur importante") ||
+        t.includes("tres mal") ||
+        t.includes("très mal") ||
+        t.includes("j'ai tres mal") ||
+        t.includes("j ai tres mal") ||
+        t.includes("aggravation")
+    );
+}
+
+function getTransferPhoneNumber(cabinet) {
+    return (
+        cabinet?.transferPhoneNumber ||
+        cabinet?.phoneNumber ||
+        ""
+    ).trim();
+}
+
+function transferCallToCabinet(vr, cabinet, intro = "Je vous transfère au cabinet.") {
+    const transferNumber = getTransferPhoneNumber(cabinet);
+
+    if (!transferNumber) {
+        return false;
+    }
+
+    sayFr(vr, intro);
+
+    const dial = vr.dial({
+        answerOnBridge: true,
+        timeout: 20,
+        action: "/twilio/transfer-status",
+        method: "POST",
+    });
+
+    dial.number(transferNumber);
+    return true;
 }
 
 async function clearSessionWithLog(callSid, session, reason = "UNKNOWN", meta = {}) {
@@ -567,7 +626,7 @@ function askActionMenu(vr, session, intro = "") {
 
     const gather = gatherSpeech(vr, "/twilio/voice", {
         hints:
-            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, information, renseignements, adresse, horaires, horaire, ouverture, fermeture, ouvert, ferme, localisation, ou se trouve le cabinet, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3, 4",
+            "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, autre, autre demande, autre chose, urgence, question, adresse, horaires, horaire, ouverture, fermeture, ouvert, ferme, localisation, ou se trouve le cabinet, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3, 4",
     });
 
     if (intro) {
@@ -576,10 +635,13 @@ function askActionMenu(vr, session, intro = "") {
 
     gather.say(
         SAY_OPTS,
-        PHRASES.greeting || "Bonjour, vous êtes bien au cabinet de kinésithérapie."
+        "Bonjour, je suis Mary, l'assistante du cabinet."
     );
 
-    gather.say(SAY_OPTS, prompt);
+    gather.say(
+        SAY_OPTS,
+        "Voulez-vous prendre, modifier ou annuler un rendez-vous ? Vous pouvez aussi dire autre."
+    );
     return gather;
 }
 
@@ -1563,6 +1625,20 @@ router.post("/voice", async (req, res) => {
                     return sendTwiml(res, vr, callSid, session);
                 }
 
+                if (detectOtherRequest(speech, digits)) {
+                    session.lastIntentContext = "OTHER";
+
+                    setStep(session, callSid, "OTHER_ROUTER", { trigger: "ACTION_OTHER" });
+
+                    promptAndGather(
+                        vr,
+                        session,
+                        "S'agit-il d'une urgence ou d'une autre demande ?",
+                        "Très bien."
+                    );
+                    return sendTwiml(res, vr, callSid, session);
+                }
+
                 if (actionChoice === "MODIFY") {
                     session.phonePurpose = "MODIFY";
                     session.lastIntentContext = "MODIFY";
@@ -1603,36 +1679,24 @@ router.post("/voice", async (req, res) => {
                     return sendTwiml(res, vr, callSid, session);
                 }
 
-                if (actionChoice === "INFO") {
-                    setStep(session, callSid, "INFO_HANDLE", { trigger: "ACTION_INFO" });
-
-                    promptAndGather(
-                        vr,
-                        session,
-                        "Souhaitez-vous connaître l'adresse du cabinet ou les horaires d'ouverture ?",
-                        "Bien sûr."
-                    );
-                    return sendTwiml(res, vr, callSid, session);
-                }
-
                 const retry = await handleRetry(vr, res, session, callSid, cabinetId, "ACTION");
                 if (retry) return retry;
 
                 const gather = gatherSpeech(vr, "/twilio/voice", {
                     hints:
-                        "prendre rendez-vous, prendre, rendez-vous, rdv, reserver, booker, modifier, changer, deplacer, reporter, annuler, supprimer, retirer, information, renseignement, adresse, horaires, horaire, ouvert, ferme, localisation, venir, 1, 2, 3, 4",
+                        "prendre rendez-vous, prendre, rendez-vous, rdv, reserver, booker, modifier, changer, deplacer, reporter, annuler, supprimer, retirer, autre, urgence, question, adresse, horaires, horaire, ouvert, ferme, localisation, venir, 1, 2, 3, 4",
                 });
 
                 setPrompt(
                     session,
-                    "Je n’ai pas bien compris. Dites prendre, modifier, annuler ou information. Vous pouvez aussi taper 1, 2, 3 ou 4."
+                    "Je n’ai pas bien compris. Dites prendre, modifier, annuler ou autre. Vous pouvez aussi taper 1, 2, 3 ou 4."
                 );
 
                 gather.say(SAY_OPTS, "Je n’ai pas bien compris.");
 
                 gather.say(
                     SAY_OPTS,
-                    "Dites prendre, modifier, annuler ou information. Vous pouvez aussi taper 1 pour prendre, 2 pour modifier, 3 pour annuler, 4 pour information."
+                    "Dites prendre, modifier, annuler ou autre. Vous pouvez aussi taper 1 pour prendre, 2 pour modifier, 3 pour annuler, 4 pour autre."
                 );
 
                 return sendTwiml(res, vr, callSid, session);
@@ -3679,7 +3743,52 @@ router.post("/voice", async (req, res) => {
                 return sendTwiml(res, vr, callSid, session);
             }
 
-            if (session.step === "INFO_HANDLE") {
+            if (session.step === "OTHER_ROUTER") {
+                if (detectUrgencyRequest(speech)) {
+                    setStep(session, callSid, "TRANSFER_TO_CABINET", {
+                        trigger: "OTHER_URGENT",
+                    });
+
+                    const transferred = transferCallToCabinet(
+                        vr,
+                        activeCabinet,
+                        "Je vous transfère immédiatement au cabinet."
+                    );
+
+                    if (!transferred) {
+                        trackFailedOnce(session, cabinetId);
+                        trackDurationOnce(session, cabinetId);
+
+                        return endCall(
+                            vr,
+                            res,
+                            callSid,
+                            session,
+                            "TRANSFER_NUMBER_MISSING",
+                            "Le transfert vers le cabinet n'est pas disponible pour le moment. Merci de rappeler directement le cabinet.",
+                            { fromStep: "OTHER_ROUTER" }
+                        );
+                    }
+
+                    trackHandledOnce(session, cabinetId);
+                    trackDurationOnce(session, cabinetId);
+                    return sendTwiml(res, vr, callSid, session);
+                }
+
+                setStep(session, callSid, "OTHER_ASK", {
+                    trigger: "OTHER_NEEDS_DETAILS",
+                });
+
+                promptAndGather(
+                    vr,
+                    session,
+                    "Quelle est votre demande ?",
+                    "D'accord."
+                );
+                return sendTwiml(res, vr, callSid, session);
+            }
+
+            if (session.step === "OTHER_ASK") {
                 const t = normalizeText(speech);
 
                 const asksAddress =
@@ -3698,6 +3807,14 @@ router.post("/voice", async (req, res) => {
                     t.includes("fermeture") ||
                     t.includes("ouvert") ||
                     t.includes("ferme");
+
+                const asksPresence =
+                    t.includes("est la aujourd hui") ||
+                    t.includes("est la aujourd'hui") ||
+                    t.includes("il est la") ||
+                    t.includes("elle est la") ||
+                    t.includes("present aujourd hui") ||
+                    t.includes("présent aujourd'hui");
 
                 if (asksAddress) {
                     incrementMetric(cabinetId, "successfulCallFlows");
@@ -3731,14 +3848,67 @@ router.post("/voice", async (req, res) => {
                     );
                 }
 
-                const retry = await handleRetry(vr, res, session, callSid, cabinetId, "INFO_HANDLE");
-                if (retry) return retry;
+                if (asksPresence) {
+                    setStep(session, callSid, "TRANSFER_TO_CABINET", {
+                        trigger: "INFO_PRESENCE_TRANSFER",
+                    });
 
-                promptAndGather(
+                    const transferred = transferCallToCabinet(
+                        vr,
+                        activeCabinet,
+                        "Je ne peux pas confirmer cette information automatiquement. Je vous transfère au cabinet."
+                    );
+
+                    if (!transferred) {
+                        trackFailedOnce(session, cabinetId);
+                        trackDurationOnce(session, cabinetId);
+
+                        return endCall(
+                            vr,
+                            res,
+                            callSid,
+                            session,
+                            "TRANSFER_NUMBER_MISSING",
+                            "Je ne peux pas confirmer cette information automatiquement, et le transfert vers le cabinet n'est pas disponible pour le moment.",
+                            {
+                                fromStep: "OTHER_ASK",
+                                intent: "PRESENCE_CHECK",
+                            }
+                        );
+                    }
+
+                    trackHandledOnce(session, cabinetId);
+                    trackDurationOnce(session, cabinetId);
+                    return sendTwiml(res, vr, callSid, session);
+                }
+
+                setStep(session, callSid, "TRANSFER_TO_CABINET", {
+                    trigger: "OTHER_UNKNOWN_TRANSFER",
+                });
+
+                const transferred = transferCallToCabinet(
                     vr,
-                    session,
-                    "Je n’ai pas bien compris. Vous pouvez dire l'adresse ou les horaires d'ouverture."
+                    activeCabinet,
+                    "Je ne peux pas traiter cette demande automatiquement. Je vous transfère au cabinet."
                 );
+
+                if (!transferred) {
+                    trackFailedOnce(session, cabinetId);
+                    trackDurationOnce(session, cabinetId);
+
+                    return endCall(
+                        vr,
+                        res,
+                        callSid,
+                        session,
+                        "TRANSFER_NUMBER_MISSING",
+                        "Je ne peux pas traiter cette demande automatiquement, et le transfert vers le cabinet n'est pas disponible pour le moment. Merci de rappeler directement le cabinet.",
+                        { fromStep: "OTHER_ASK" }
+                    );
+                }
+
+                trackHandledOnce(session, cabinetId);
+                trackDurationOnce(session, cabinetId);
                 return sendTwiml(res, vr, callSid, session);
             }
 
@@ -3800,6 +3970,36 @@ router.post("/voice", async (req, res) => {
         vr.hangup();
         return sendTwiml(res, vr);
     }
+});
+
+router.post("/transfer-status", async (req, res) => {
+    const vr = new twilio.twiml.VoiceResponse();
+    const status = (req.body?.DialCallStatus || "").trim();
+
+    logInfo("TRANSFER_STATUS", {
+        callSid: safeCallSid(req),
+        dialCallStatus: status || null,
+    });
+
+    if (status === "completed") {
+        return sendTwiml(res, vr);
+    }
+
+    if (status === "busy") {
+        sayFr(vr, "Le cabinet est actuellement occupé. Merci de rappeler dans quelques instants.");
+        vr.hangup();
+        return sendTwiml(res, vr);
+    }
+
+    if (status === "no-answer") {
+        sayFr(vr, "Le cabinet ne répond pas pour le moment. Merci de rappeler plus tard.");
+        vr.hangup();
+        return sendTwiml(res, vr);
+    }
+
+    sayFr(vr, "Le transfert vers le cabinet n'a pas pu aboutir. Merci de rappeler plus tard.");
+    vr.hangup();
+    return sendTwiml(res, vr);
 });
 
 module.exports = router;
