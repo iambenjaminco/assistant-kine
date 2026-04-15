@@ -28,6 +28,7 @@ function mapDbCabinetToApp(row) {
 
     twilioPhoneNumber: row.twilio_phone_number || "",
     smsPhoneNumber: row.sms_phone_number || "",
+    transferPhoneNumber: row.transfer_phone_number || "",
 
     addressSpeech: row.address_speech || "",
     hoursSpeech: row.hours_speech || "",
@@ -87,6 +88,10 @@ function mapAppUpdatesToDb(cabinetId, updates = {}) {
     sms_phone_number:
       updates.smsPhoneNumber ??
       updates.sms_phone_number,
+
+    transfer_phone_number:
+      updates.transferPhoneNumber ??
+      updates.transfer_phone_number,
 
     stripe_customer_id:
       updates.stripeCustomerId ??
