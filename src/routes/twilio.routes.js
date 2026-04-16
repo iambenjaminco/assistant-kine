@@ -386,6 +386,30 @@ function pickVariant(session, key, values) {
     return values[index];
 }
 
+function getTransferFallback(session, type) {
+    const variants = {
+        UNAVAILABLE: [
+            "Je ne peux pas vous mettre en relation avec le cabinet pour le moment. Merci de rappeler un peu plus tard.",
+            "Le cabinet n'est pas joignable pour le moment. Merci de réessayer plus tard.",
+            "Je n'arrive pas à vous mettre en relation avec le cabinet actuellement. Merci de rappeler un peu plus tard.",
+        ],
+
+        INFO_UNKNOWN: [
+            "Je ne peux pas confirmer cette information automatiquement, et je ne peux pas vous mettre en relation pour le moment. Merci de rappeler un peu plus tard.",
+            "Je n’ai pas accès à cette information pour le moment, et le cabinet n’est pas joignable. Merci de réessayer plus tard.",
+        ],
+
+        GENERIC: [
+            "Je ne peux pas traiter cette demande automatiquement, et je ne peux pas vous mettre en relation pour le moment. Merci de rappeler un peu plus tard.",
+            "Je ne suis pas en mesure de traiter cette demande pour le moment. Merci de réessayer un peu plus tard.",
+        ],
+    };
+
+    const list = variants[type] || variants.GENERIC;
+
+    return pickVariant(session, `fallback_${type}`, list);
+}
+
 function buildSessionSnapshot(session) {
     return buildSessionSnapshotBase(session, {
         maskPhone,
@@ -3765,7 +3789,7 @@ router.post("/voice", async (req, res) => {
                             callSid,
                             session,
                             "TRANSFER_NUMBER_MISSING",
-                            "Je ne peux pas vous mettre en relation avec le cabinet pour le moment. Merci de rappeler un peu plus tard.",
+                            getTransferFallback(session, "UNAVAILABLE"),
                             { fromStep: "OTHER_ROUTER" }
                         );
                     }
@@ -3869,7 +3893,7 @@ router.post("/voice", async (req, res) => {
                             callSid,
                             session,
                             "TRANSFER_NUMBER_MISSING",
-                            "Je ne peux pas confirmer cette information automatiquement, et je ne peux pas vous mettre en relation avec le cabinet pour le moment. Merci de rappeler un peu plus tard.",
+                            getTransferFallback(session, "INFO_UNKNOWN"),
                             {
                                 fromStep: "OTHER_ASK",
                                 intent: "PRESENCE_CHECK",
@@ -3902,7 +3926,7 @@ router.post("/voice", async (req, res) => {
                         callSid,
                         session,
                         "TRANSFER_NUMBER_MISSING",
-                        "Je ne peux pas traiter cette demande automatiquement, et je ne peux pas vous mettre en relation avec le cabinet pour le moment. Merci de rappeler un peu plus tard.",
+                        getTransferFallback(session, "GENERIC"),
                         { fromStep: "OTHER_ASK" }
                     );
                 }
