@@ -3765,7 +3765,7 @@ router.post("/voice", async (req, res) => {
                             callSid,
                             session,
                             "TRANSFER_NUMBER_MISSING",
-                            "Le transfert vers le cabinet n'est pas disponible pour le moment. Merci de rappeler directement le cabinet.",
+                            "Je ne peux pas vous mettre en relation avec le cabinet pour le moment. Merci de rappeler un peu plus tard.",
                             { fromStep: "OTHER_ROUTER" }
                         );
                     }
@@ -3869,7 +3869,7 @@ router.post("/voice", async (req, res) => {
                             callSid,
                             session,
                             "TRANSFER_NUMBER_MISSING",
-                            "Je ne peux pas confirmer cette information automatiquement, et le transfert vers le cabinet n'est pas disponible pour le moment.",
+                            "Je ne peux pas confirmer cette information automatiquement, et je ne peux pas vous mettre en relation avec le cabinet pour le moment. Merci de rappeler un peu plus tard.",
                             {
                                 fromStep: "OTHER_ASK",
                                 intent: "PRESENCE_CHECK",
@@ -3902,7 +3902,7 @@ router.post("/voice", async (req, res) => {
                         callSid,
                         session,
                         "TRANSFER_NUMBER_MISSING",
-                        "Je ne peux pas traiter cette demande automatiquement, et le transfert vers le cabinet n'est pas disponible pour le moment. Merci de rappeler directement le cabinet.",
+                        "Je ne peux pas traiter cette demande automatiquement, et je ne peux pas vous mettre en relation avec le cabinet pour le moment. Merci de rappeler un peu plus tard.",
                         { fromStep: "OTHER_ASK" }
                     );
                 }
@@ -3974,7 +3974,7 @@ router.post("/voice", async (req, res) => {
 
 router.post("/transfer-status", async (req, res) => {
     const vr = new twilio.twiml.VoiceResponse();
-    const status = (req.body?.DialCallStatus || "").trim();
+    const status = String(req.body?.DialCallStatus || "").trim().toLowerCase();
 
     logInfo("TRANSFER_STATUS", {
         callSid: safeCallSid(req),
@@ -3986,18 +3986,36 @@ router.post("/transfer-status", async (req, res) => {
     }
 
     if (status === "busy") {
-        sayFr(vr, "Le cabinet est actuellement occupé. Merci de rappeler dans quelques instants.");
+        sayFr(
+            vr,
+            "Le cabinet est actuellement en ligne. Merci de rappeler dans quelques instants."
+        );
         vr.hangup();
         return sendTwiml(res, vr);
     }
 
     if (status === "no-answer") {
-        sayFr(vr, "Le cabinet ne répond pas pour le moment. Merci de rappeler plus tard.");
+        sayFr(
+            vr,
+            "Le cabinet ne répond pas pour le moment. Merci de rappeler un peu plus tard."
+        );
         vr.hangup();
         return sendTwiml(res, vr);
     }
 
-    sayFr(vr, "Le transfert vers le cabinet n'a pas pu aboutir. Merci de rappeler plus tard.");
+    if (status === "failed" || status === "canceled") {
+        sayFr(
+            vr,
+            "Je n'ai pas pu vous mettre en relation avec le cabinet. Merci de rappeler plus tard."
+        );
+        vr.hangup();
+        return sendTwiml(res, vr);
+    }
+
+    sayFr(
+        vr,
+        "Je n'ai pas pu vous mettre en relation avec le cabinet pour le moment. Merci de rappeler plus tard."
+    );
     vr.hangup();
     return sendTwiml(res, vr);
 });
