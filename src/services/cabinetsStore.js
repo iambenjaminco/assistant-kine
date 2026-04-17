@@ -26,9 +26,9 @@ function mapDbCabinetToApp(row) {
         p.calendarId.trim()
     ),
 
-    twilioPhoneNumber: row.twilio_phone_number || "",
-    smsPhoneNumber: row.sms_phone_number || "",
-    transferPhoneNumber: row.transfer_phone_number || "",
+    twilioPhoneNumber: (row.twilio_phone_number || "").toString().trim(),
+    smsPhoneNumber: (row.sms_phone_number || "").toString().trim(),
+    transferPhoneNumber: (row.transfer_phone_number || "").toString().trim(),
 
     addressSpeech: row.address_speech || "",
     hoursSpeech: row.hours_speech || "",

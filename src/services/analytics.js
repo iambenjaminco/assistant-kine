@@ -1,32 +1,4 @@
-const fs = require("fs");
-const path = require("path");
-
-const DATA_DIR = path.join(__dirname, "../../data");
-const ANALYTICS_FILE = path.join(DATA_DIR, "analytics.json");
-
-function ensureAnalyticsFile() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-
-  if (!fs.existsSync(ANALYTICS_FILE)) {
-    fs.writeFileSync(
-      ANALYTICS_FILE,
-      JSON.stringify({ cabinets: {} }, null, 2),
-      "utf8"
-    );
-  }
-}
-
-function readAnalytics() {
-  ensureAnalyticsFile();
-  const raw = fs.readFileSync(ANALYTICS_FILE, "utf8");
-  return JSON.parse(raw);
-}
-
-function writeAnalytics(data) {
-  fs.writeFileSync(ANALYTICS_FILE, JSON.stringify(data, null, 2), "utf8");
-}
+const supabase = require("../config/supabase");
 
 function getDateKeyParis() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -37,26 +9,97 @@ function getDateKeyParis() {
   }).format(new Date());
 }
 
-function ensureCabinet(data, cabinetKey) {
-  if (!data.cabinets[cabinetKey]) {
-    data.cabinets[cabinetKey] = {
-      totals: {
-        callsReceived: 0,
-        callsHandled: 0,
-        appointmentsBooked: 0,
-        appointmentsModified: 0,
-        appointmentsCancelled: 0,
-        failedCalls: 0,
-        totalCallDurationSeconds: 0,
-      },
-      daily: {},
-    };
+function assertSupabase() {
+  if (!supabase) {
+    throw new Error("SUPABASE_NOT_CONFIGURED");
   }
 }
 
-function ensureDay(cabinetStats, dateKey) {
-  if (!cabinetStats.daily[dateKey]) {
-    cabinetStats.daily[dateKey] = {
+async function incrementMetric(cabinetKey, metric, amount = 1) {
+  if (!cabinetKey) return;
+  if (!Number.isFinite(amount) || amount <= 0) return;
+
+  assertSupabase();
+
+  const dateKey = getDateKeyParis();
+
+  const { error } = await supabase.rpc("increment_cabinet_daily_metric", {
+    p_cabinet_id: cabinetKey,
+    p_date: dateKey,
+    p_metric: metric,
+    p_amount: amount,
+  });
+
+  if (error) {
+    console.error("[ANALYTICS][INCREMENT_ERROR]", {
+      cabinetKey,
+      metric,
+      amount,
+      dateKey,
+      message: error.message,
+    });
+    throw new Error("ANALYTICS_INCREMENT_FAILED");
+  }
+}
+
+async function addCallDuration(cabinetKey, durationSeconds) {
+  if (!cabinetKey) return;
+  if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+
+  assertSupabase();
+
+  const dateKey = getDateKeyParis();
+
+  const { error } = await supabase.rpc("add_cabinet_daily_call_duration", {
+    p_cabinet_id: cabinetKey,
+    p_date: dateKey,
+    p_duration_seconds: Math.round(durationSeconds),
+  });
+
+  if (error) {
+    console.error("[ANALYTICS][ADD_DURATION_ERROR]", {
+      cabinetKey,
+      durationSeconds,
+      dateKey,
+      message: error.message,
+    });
+    throw new Error("ANALYTICS_ADD_DURATION_FAILED");
+  }
+}
+
+async function getCabinetAnalytics(cabinetKey) {
+  if (!cabinetKey) return null;
+
+  assertSupabase();
+
+  const { data, error } = await supabase
+    .from("cabinet_daily_metrics")
+    .select("*")
+    .eq("cabinet_id", cabinetKey)
+    .order("date", { ascending: false });
+
+  if (error) {
+    console.error("[ANALYTICS][GET_CABINET_ANALYTICS_ERROR]", {
+      cabinetKey,
+      message: error.message,
+    });
+    throw new Error("GET_CABINET_ANALYTICS_FAILED");
+  }
+
+  const rows = Array.isArray(data) ? data : [];
+
+  const totals = rows.reduce(
+    (acc, row) => {
+      acc.callsReceived += row.calls_received || 0;
+      acc.callsHandled += row.calls_handled || 0;
+      acc.appointmentsBooked += row.appointments_booked || 0;
+      acc.appointmentsModified += row.appointments_modified || 0;
+      acc.appointmentsCancelled += row.appointments_cancelled || 0;
+      acc.failedCalls += row.failed_calls || 0;
+      acc.totalCallDurationSeconds += row.total_call_duration_seconds || 0;
+      return acc;
+    },
+    {
       callsReceived: 0,
       callsHandled: 0,
       appointmentsBooked: 0,
@@ -64,50 +107,28 @@ function ensureDay(cabinetStats, dateKey) {
       appointmentsCancelled: 0,
       failedCalls: 0,
       totalCallDurationSeconds: 0,
-    };
-  }
-}
+    }
+  );
 
-function incrementMetric(cabinetKey, metric, amount = 1) {
-  const data = readAnalytics();
-  ensureCabinet(data, cabinetKey);
+  const daily = Object.fromEntries(
+    rows.map((row) => [
+      row.date,
+      {
+        callsReceived: row.calls_received || 0,
+        callsHandled: row.calls_handled || 0,
+        appointmentsBooked: row.appointments_booked || 0,
+        appointmentsModified: row.appointments_modified || 0,
+        appointmentsCancelled: row.appointments_cancelled || 0,
+        failedCalls: row.failed_calls || 0,
+        totalCallDurationSeconds: row.total_call_duration_seconds || 0,
+      },
+    ])
+  );
 
-  const dateKey = getDateKeyParis();
-  ensureDay(data.cabinets[cabinetKey], dateKey);
-
-  if (typeof data.cabinets[cabinetKey].totals[metric] !== "number") {
-    data.cabinets[cabinetKey].totals[metric] = 0;
-  }
-
-  if (typeof data.cabinets[cabinetKey].daily[dateKey][metric] !== "number") {
-    data.cabinets[cabinetKey].daily[dateKey][metric] = 0;
-  }
-
-  data.cabinets[cabinetKey].totals[metric] += amount;
-  data.cabinets[cabinetKey].daily[dateKey][metric] += amount;
-
-  writeAnalytics(data);
-}
-
-function addCallDuration(cabinetKey, durationSeconds) {
-  if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
-
-  const data = readAnalytics();
-  ensureCabinet(data, cabinetKey);
-
-  const dateKey = getDateKeyParis();
-  ensureDay(data.cabinets[cabinetKey], dateKey);
-
-  data.cabinets[cabinetKey].totals.totalCallDurationSeconds += durationSeconds;
-  data.cabinets[cabinetKey].daily[dateKey].totalCallDurationSeconds += durationSeconds;
-
-  writeAnalytics(data);
-}
-
-function getCabinetAnalytics(cabinetKey) {
-  const data = readAnalytics();
-  ensureCabinet(data, cabinetKey);
-  return data.cabinets[cabinetKey];
+  return {
+    totals,
+    daily,
+  };
 }
 
 module.exports = {

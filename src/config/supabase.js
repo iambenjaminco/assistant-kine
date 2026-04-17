@@ -7,6 +7,15 @@ if (!supabaseUrl || !supabaseKey) {
   throw new Error("Supabase non configuré");
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: {
+    persistSession: false, // important en backend
+  },
+  global: {
+    headers: {
+      "x-application-name": "assistant-kine-saas",
+    },
+  },
+});
 
 module.exports = supabase;

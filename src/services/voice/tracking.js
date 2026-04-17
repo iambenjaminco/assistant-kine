@@ -14,37 +14,37 @@ function ensureTracking(session) {
     }
 }
 
-function trackCallReceived(session, cabinetKey = "main", incrementMetric) {
+async function trackCallReceived(session, cabinetKey = "main", incrementMetric) {
     ensureTracking(session);
 
     if (!session?.tracking || session.tracking.callReceivedTracked) return;
     if (typeof incrementMetric !== "function") return;
 
-    incrementMetric(cabinetKey, "callsReceived");
+    await incrementMetric(cabinetKey, "callsReceived");
     session.tracking.callReceivedTracked = true;
 }
 
-function trackCallHandled(session, cabinetKey = "main", incrementMetric) {
+async function trackCallHandled(session, cabinetKey = "main", incrementMetric) {
     ensureTracking(session);
 
     if (!session?.tracking || session.tracking.callHandledTracked) return;
     if (typeof incrementMetric !== "function") return;
 
-    incrementMetric(cabinetKey, "callsHandled");
+    await incrementMetric(cabinetKey, "callsHandled");
     session.tracking.callHandledTracked = true;
 }
 
-function trackFailedCall(session, cabinetKey = "main", incrementMetric) {
+async function trackFailedCall(session, cabinetKey = "main", incrementMetric) {
     ensureTracking(session);
 
     if (!session?.tracking || session.tracking.failedCallTracked) return;
     if (typeof incrementMetric !== "function") return;
 
-    incrementMetric(cabinetKey, "failedCalls");
+    await incrementMetric(cabinetKey, "failedCalls");
     session.tracking.failedCallTracked = true;
 }
 
-function trackCallDuration(session, cabinetKey = "main", addCallDuration) {
+async function trackCallDuration(session, cabinetKey = "main", addCallDuration) {
     ensureTracking(session);
 
     if (!session?.tracking || session.tracking.durationTracked) return;
@@ -53,7 +53,7 @@ function trackCallDuration(session, cabinetKey = "main", addCallDuration) {
     const startedAt = Number(session.tracking.startedAt || session.createdAt || Date.now());
     const durationSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
 
-    addCallDuration(cabinetKey, durationSeconds);
+    await addCallDuration(cabinetKey, durationSeconds);
     session.tracking.durationTracked = true;
 }
 

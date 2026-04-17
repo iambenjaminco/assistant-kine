@@ -180,29 +180,29 @@ function ensureMetricsFlags(session) {
     }
 }
 
-function trackHandledOnce(session, cabinetId) {
+async function trackHandledOnce(session, cabinetId) {
     ensureMetricsFlags(session);
 
     if (!session.metricsTracked.handled) {
-        trackCallHandled(session, cabinetId, incrementMetric);
+        await trackCallHandled(session, cabinetId, incrementMetric);
         session.metricsTracked.handled = true;
     }
 }
 
-function trackFailedOnce(session, cabinetId) {
+async function trackFailedOnce(session, cabinetId) {
     ensureMetricsFlags(session);
 
     if (!session.metricsTracked.failed) {
-        trackFailedCall(session, cabinetId, incrementMetric);
+        await trackFailedCall(session, cabinetId, incrementMetric);
         session.metricsTracked.failed = true;
     }
 }
 
-function trackDurationOnce(session, cabinetId) {
+async function trackDurationOnce(session, cabinetId) {
     ensureMetricsFlags(session);
 
     if (!session.metricsTracked.durationTracked) {
-        trackCallDuration(session, cabinetId, addCallDuration);
+        await trackCallDuration(session, cabinetId, addCallDuration);
         session.metricsTracked.durationTracked = true;
     }
 }
@@ -270,11 +270,13 @@ function detectUrgencyRequest(text = "") {
 }
 
 function getTransferPhoneNumber(cabinet) {
-    return (
-        cabinet?.transferPhoneNumber ||
-        cabinet?.phoneNumber ||
-        ""
+    return String(
+        cabinet?.transferPhoneNumber || ""
     ).trim();
+}
+
+function hasTransferPhoneNumber(cabinet) {
+    return Boolean(getTransferPhoneNumber(cabinet));
 }
 
 function transferCallToCabinet(vr, cabinet, intro = "Je vous transfère au cabinet.") {
@@ -388,6 +390,11 @@ function pickVariant(session, key, values) {
 
 function getTransferFallback(session, type) {
     const variants = {
+        MISSING_CONFIG: [
+            "Le cabinet n'a pas encore configuré la mise en relation téléphonique. Merci de rappeler un peu plus tard.",
+            "La mise en relation avec le cabinet n'est pas encore disponible. Merci de rappeler plus tard.",
+        ],
+
         UNAVAILABLE: [
             "Je ne peux pas vous mettre en relation avec le cabinet pour le moment. Merci de rappeler un peu plus tard.",
             "Le cabinet n'est pas joignable pour le moment. Merci de réessayer plus tard.",
@@ -406,8 +413,72 @@ function getTransferFallback(session, type) {
     };
 
     const list = variants[type] || variants.GENERIC;
-
     return pickVariant(session, `fallback_${type}`, list);
+}
+
+function askIfOtherQuestion(vr, session, intro = "") {
+    setPrompt(session, "Est-ce que vous avez d'autre question ?");
+
+    const gather = gatherSpeech(vr, "/twilio/voice");
+
+    if (intro) {
+        sayFr(gather, intro);
+    }
+
+    sayFr(gather, session.lastPrompt);
+    return gather;
+}
+
+async function tryTransferToCabinet({
+    vr,
+    res,
+    session,
+    callSid,
+    cabinetId,
+    cabinet,
+    intro,
+    fallbackType = "UNAVAILABLE",
+    endReason = "TRANSFER_FAILED",
+    meta = {},
+}) {
+    const hasNumber = hasTransferPhoneNumber(cabinet);
+
+    if (!hasNumber) {
+        await trackFailedOnce(session, cabinetId);
+        await trackDurationOnce(session, cabinetId);
+
+        return endCall(
+            vr,
+            res,
+            callSid,
+            session,
+            "TRANSFER_NUMBER_MISSING",
+            getTransferFallback(session, "MISSING_CONFIG"),
+            meta
+        );
+    }
+
+    const transferred = transferCallToCabinet(vr, cabinet, intro);
+
+    if (!transferred) {
+        await trackFailedOnce(session, cabinetId);
+        await trackDurationOnce(session, cabinetId);
+
+        return endCall(
+            vr,
+            res,
+            callSid,
+            session,
+            endReason,
+            getTransferFallback(session, fallbackType),
+            meta
+        );
+    }
+
+    await trackHandledOnce(session, cabinetId);
+    await trackDurationOnce(session, cabinetId);
+
+    return sendTwiml(res, vr, callSid, session);
 }
 
 function buildSessionSnapshot(session) {
@@ -624,8 +695,8 @@ async function handleRetry(vr, res, session, callSid, cabinetId, reason = "UNKNO
             reason,
         });
 
-        trackFailedOnce(session, cabinetId);
-        trackDurationOnce(session, cabinetId);
+        await trackFailedOnce(session, cabinetId);
+        await trackDurationOnce(session, cabinetId);
         return endCall(
             vr,
             res,
@@ -883,6 +954,29 @@ async function proposeSlotsFromRequestedDate({
     });
 
     if (!session.slots.length) {
+        const preferredName = session.preferredPractitioner?.name || null;
+
+        if (preferredName && session.lastIntentContext === "BOOK") {
+            sayFr(
+                vr,
+                `Je n’ai pas de disponibilité avec ${preferredName} à cette date.`
+            );
+
+            setStep(session, callSid, "BOOK_NO_SLOT_WITH_PRACTITIONER", {
+                trigger: "NO_SLOT_SPECIFIC_PRACTITIONER_DATE",
+                practitioner: preferredName,
+                requestedDateISO,
+            });
+
+            promptAndGather(
+                vr,
+                session,
+                "Souhaitez-vous un autre praticien du cabinet, attendre un autre moment, ou être mis en relation avec le cabinet ?"
+            );
+
+            return sendTwiml(res, vr, callSid, session);
+        }
+
         setStep(
             session,
             callSid,
@@ -1052,6 +1146,27 @@ async function proposeBookingSlots({
     });
 
     if (!session.slots.length) {
+        const preferredName = session.preferredPractitioner?.name || null;
+
+        if (preferredName) {
+            sayFr(
+                vr,
+                `Je n’ai pas de disponibilité avec ${preferredName} dans les prochains jours.`
+            );
+
+            setStep(session, callSid, "BOOK_NO_SLOT_WITH_PRACTITIONER", {
+                trigger: "NO_SLOT_SPECIFIC_PRACTITIONER",
+                practitioner: preferredName,
+            });
+
+            promptAndGather(
+                vr,
+                session,
+                "Souhaitez-vous un autre praticien du cabinet, attendre un créneau plus tard, ou être mis en relation avec le cabinet ?"
+            );
+            return sendTwiml(res, vr, callSid, session);
+        }
+
         let msg;
         let followUpPrompt;
 
@@ -1249,10 +1364,9 @@ async function finalizeBooking(vr, res, session, callSid, cabinet, cabinetId) {
     });
 
     if (result.ok) {
-        incrementMetric(cabinetId, "appointmentsBooked");
-        incrementMetric(cabinetId, "successfulCallFlows");
-        trackHandledOnce(session, cabinetId);
-        trackDurationOnce(session, cabinetId);
+        await incrementMetric(cabinetId, "appointmentsBooked");
+        await trackHandledOnce(session, cabinetId);
+        await trackDurationOnce(session, cabinetId);
         logCallOutcome(callSid, "BOOK_SUCCESS", session, {
             eventId: result.event?.id || null,
             slot: summarizeSlot(slot),
@@ -1462,7 +1576,7 @@ router.post("/voice", async (req, res) => {
         }
 
         if (!session.metricsTracked.received) {
-            trackCallReceived(session, cabinetId, incrementMetric);
+            await trackCallReceived(session, cabinetId, incrementMetric);
             session.metricsTracked.received = true;
         }
         logInfo("VOICE_WEBHOOK", {
@@ -1514,8 +1628,8 @@ router.post("/voice", async (req, res) => {
                 snapshot: buildSessionSnapshot(session),
             });
 
-            trackFailedOnce(session, cabinetId);
-            trackDurationOnce(session, cabinetId);
+            await trackFailedOnce(session, cabinetId);
+            await trackDurationOnce(session, cabinetId);
             return endCall(
                 vr,
                 res,
@@ -1583,8 +1697,8 @@ router.post("/voice", async (req, res) => {
                 return sendTwiml(res, vr, callSid, session);
             }
 
-            trackFailedOnce(session, cabinetId);
-            trackDurationOnce(session, cabinetId);
+            await trackFailedOnce(session, cabinetId);
+            await trackDurationOnce(session, cabinetId);
             return endCall(
                 vr,
                 res,
@@ -1657,7 +1771,7 @@ router.post("/voice", async (req, res) => {
                     promptAndGather(
                         vr,
                         session,
-                        "S'agit-il d'une urgence ou d'une autre demande ?",
+                        "S'agit-il d'une urgence ou d'une demande d'information ?",
                         "Très bien."
                     );
                     return sendTwiml(res, vr, callSid, session);
@@ -2068,6 +2182,79 @@ router.post("/voice", async (req, res) => {
                     vr,
                     session,
                     "Je n’ai pas bien compris. Merci de me dire avec quel kiné vous êtes suivi, ou dites peu importe."
+                );
+                return sendTwiml(res, vr, callSid, session);
+            }
+
+            if (session.step === "BOOK_NO_SLOT_WITH_PRACTITIONER") {
+                const t = normalizeText(speech);
+
+                if (
+                    t.includes("autre") ||
+                    t.includes("quelqu'un d'autre") ||
+                    t.includes("quelquun d'autre") ||
+                    t.includes("autre kine") ||
+                    t.includes("autre kiné") ||
+                    t.includes("autre praticien")
+                ) {
+                    session.preferredPractitioner = null;
+                    session.practitionerPreferenceMode = "ANY";
+
+                    sayFr(vr, "Très bien, je regarde avec un autre praticien.");
+
+                    return proposeBookingSlots({
+                        vr,
+                        res,
+                        session,
+                        callSid,
+                        cabinet: activeCabinet,
+                    });
+                }
+
+                if (
+                    t.includes("attendre") ||
+                    t.includes("plus tard") ||
+                    t.includes("semaine prochaine")
+                ) {
+                    sayFr(vr, "Très bien, je recherche des créneaux plus tard.");
+
+                    const inSevenDays = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+                    return proposeBookingSlots({
+                        vr,
+                        res,
+                        session,
+                        callSid,
+                        cabinet: activeCabinet,
+                        fromDateISO: inSevenDays,
+                    });
+                }
+
+                if (
+                    t.includes("cabinet") ||
+                    t.includes("mettre en relation") ||
+                    t.includes("transfert") ||
+                    t.includes("transferer") ||
+                    t.includes("transférer")
+                ) {
+                    return tryTransferToCabinet({
+                        vr,
+                        res,
+                        session,
+                        callSid,
+                        cabinetId,
+                        cabinet: activeCabinet,
+                        intro: "Je vous mets en relation avec le cabinet.",
+                        fallbackType: "UNAVAILABLE",
+                        endReason: "TRANSFER_FAILED",
+                        meta: { fromStep: "BOOK_NO_SLOT_WITH_PRACTITIONER" },
+                    });
+                }
+
+                promptAndGather(
+                    vr,
+                    session,
+                    "Souhaitez-vous un autre praticien du cabinet, attendre un créneau plus tard, ou être mis en relation avec le cabinet ?"
                 );
                 return sendTwiml(res, vr, callSid, session);
             }
@@ -2589,10 +2776,9 @@ router.post("/voice", async (req, res) => {
                 });
 
                 if (result.ok) {
-                    incrementMetric(cabinetId, "appointmentsBooked");
-                    incrementMetric(cabinetId, "successfulCallFlows");
-                    trackHandledOnce(session, cabinetId);
-                    trackDurationOnce(session, cabinetId);
+                    await incrementMetric(cabinetId, "appointmentsBooked");
+                    await trackHandledOnce(session, cabinetId);
+                    await trackDurationOnce(session, cabinetId);
                     logCallOutcome(callSid, "BOOK_ALT_SUCCESS", session, {
                         eventId: result.event?.id || null,
                         slot: summarizeSlot(slot),
@@ -3299,10 +3485,9 @@ router.post("/voice", async (req, res) => {
                         });
                         return sendTwiml(res, vr);
                     }
-                    incrementMetric(cabinetId, "appointmentsModified");
-                    incrementMetric(cabinetId, "successfulCallFlows");
-                    trackHandledOnce(session, cabinetId);
-                    trackDurationOnce(session, cabinetId);
+                    await incrementMetric(cabinetId, "appointmentsModified");
+                    await trackHandledOnce(session, cabinetId);
+                    await trackDurationOnce(session, cabinetId);
                     logCallOutcome(callSid, "MODIFY_SUCCESS", session, {
                         oldEventId: session.foundEvent?.eventId || null,
                         oldStartISO: session.foundEvent?.startISO || null,
@@ -3694,9 +3879,8 @@ router.post("/voice", async (req, res) => {
                     cancelledStartISO: found.startISO,
                 }, buildSessionSnapshot);
 
-                incrementMetric(cabinetId, "appointmentsCancelled");
-                incrementMetric(cabinetId, "successfulCallFlows");
-                trackHandledOnce(session, cabinetId);
+                await incrementMetric(cabinetId, "appointmentsCancelled");
+                await trackHandledOnce(session, cabinetId);
                 setStep(session, callSid, "CANCEL_ASK_REBOOK", {
                     trigger: "CANCEL_SUCCESS",
                     cancelledEventId: found.eventId || null,
@@ -3739,7 +3923,7 @@ router.post("/voice", async (req, res) => {
                 }
 
                 if (yesNo === false) {
-                    trackDurationOnce(session, cabinetId);
+                    await trackDurationOnce(session, cabinetId);
 
                     return endCall(
                         vr,
@@ -3773,30 +3957,18 @@ router.post("/voice", async (req, res) => {
                         trigger: "OTHER_URGENT",
                     });
 
-                    const transferred = transferCallToCabinet(
+                    return tryTransferToCabinet({
                         vr,
-                        activeCabinet,
-                        "Je vous transfère immédiatement au cabinet."
-                    );
-
-                    if (!transferred) {
-                        trackFailedOnce(session, cabinetId);
-                        trackDurationOnce(session, cabinetId);
-
-                        return endCall(
-                            vr,
-                            res,
-                            callSid,
-                            session,
-                            "TRANSFER_NUMBER_MISSING",
-                            getTransferFallback(session, "UNAVAILABLE"),
-                            { fromStep: "OTHER_ROUTER" }
-                        );
-                    }
-
-                    trackHandledOnce(session, cabinetId);
-                    trackDurationOnce(session, cabinetId);
-                    return sendTwiml(res, vr, callSid, session);
+                        res,
+                        session,
+                        callSid,
+                        cabinetId,
+                        cabinet: activeCabinet,
+                        intro: "Je vous transfère immédiatement au cabinet.",
+                        fallbackType: "UNAVAILABLE",
+                        endReason: "TRANSFER_FAILED",
+                        meta: { fromStep: "OTHER_ROUTER" },
+                    });
                 }
 
                 setStep(session, callSid, "OTHER_ASK", {
@@ -3813,6 +3985,18 @@ router.post("/voice", async (req, res) => {
             }
 
             if (session.step === "OTHER_ASK") {
+                if (!speech || !normalizeText(speech)) {
+                    const retry = await handleRetry(vr, res, session, callSid, cabinetId, "OTHER_ASK_EMPTY");
+                    if (retry) return retry;
+
+                    promptAndGather(
+                        vr,
+                        session,
+                        "Je n’ai pas bien compris votre demande. Vous pouvez par exemple dire l'adresse, les horaires, ou préciser votre question."
+                    );
+                    return sendTwiml(res, vr, callSid, session);
+                }
+
                 const t = normalizeText(speech);
 
                 const asksAddress =
@@ -3841,35 +4025,37 @@ router.post("/voice", async (req, res) => {
                     t.includes("présent aujourd'hui");
 
                 if (asksAddress) {
-                    incrementMetric(cabinetId, "successfulCallFlows");
-                    trackHandledOnce(session, cabinetId);
-                    trackDurationOnce(session, cabinetId);
+                    await trackHandledOnce(session, cabinetId);
 
-                    return endCall(
+                    setStep(session, callSid, "OTHER_ASK_MORE", {
+                        trigger: "INFO_ADDRESS_GIVEN",
+                    });
+
+                    askIfOtherQuestion(
                         vr,
-                        res,
-                        callSid,
                         session,
-                        "INFO_ADDRESS_GIVEN",
                         activeCabinet?.addressSpeech ||
                         "Le cabinet se situe à l'adresse renseignée par le cabinet."
                     );
+
+                    return sendTwiml(res, vr, callSid, session);
                 }
 
                 if (asksHours) {
-                    incrementMetric(cabinetId, "successfulCallFlows");
-                    trackHandledOnce(session, cabinetId);
-                    trackDurationOnce(session, cabinetId);
+                    await trackHandledOnce(session, cabinetId);
 
-                    return endCall(
+                    setStep(session, callSid, "OTHER_ASK_MORE", {
+                        trigger: "INFO_HOURS_GIVEN",
+                    });
+
+                    askIfOtherQuestion(
                         vr,
-                        res,
-                        callSid,
                         session,
-                        "INFO_HOURS_GIVEN",
                         activeCabinet?.hoursSpeech ||
                         "Le cabinet est ouvert du lundi au vendredi de 8 heures à 12 heures et de 14 heures à 19 heures."
                     );
+
+                    return sendTwiml(res, vr, callSid, session);
                 }
 
                 if (asksPresence) {
@@ -3877,62 +4063,101 @@ router.post("/voice", async (req, res) => {
                         trigger: "INFO_PRESENCE_TRANSFER",
                     });
 
-                    const transferred = transferCallToCabinet(
+                    return tryTransferToCabinet({
                         vr,
-                        activeCabinet,
-                        "Je ne peux pas confirmer cette information automatiquement. Je vous transfère au cabinet."
-                    );
-
-                    if (!transferred) {
-                        trackFailedOnce(session, cabinetId);
-                        trackDurationOnce(session, cabinetId);
-
-                        return endCall(
-                            vr,
-                            res,
-                            callSid,
-                            session,
-                            "TRANSFER_NUMBER_MISSING",
-                            getTransferFallback(session, "INFO_UNKNOWN"),
-                            {
-                                fromStep: "OTHER_ASK",
-                                intent: "PRESENCE_CHECK",
-                            }
-                        );
-                    }
-
-                    trackHandledOnce(session, cabinetId);
-                    trackDurationOnce(session, cabinetId);
-                    return sendTwiml(res, vr, callSid, session);
+                        res,
+                        session,
+                        callSid,
+                        cabinetId,
+                        cabinet: activeCabinet,
+                        intro: "Je ne peux pas confirmer cette information automatiquement. Je vous transfère au cabinet.",
+                        fallbackType: "INFO_UNKNOWN",
+                        endReason: "TRANSFER_FAILED",
+                        meta: {
+                            fromStep: "OTHER_ASK",
+                            intent: "PRESENCE_CHECK",
+                        },
+                    });
                 }
 
                 setStep(session, callSid, "TRANSFER_TO_CABINET", {
                     trigger: "OTHER_UNKNOWN_TRANSFER",
                 });
 
-                const transferred = transferCallToCabinet(
+                return tryTransferToCabinet({
                     vr,
-                    activeCabinet,
-                    "Je ne peux pas traiter cette demande automatiquement. Je vous transfère au cabinet."
-                );
+                    res,
+                    session,
+                    callSid,
+                    cabinetId,
+                    cabinet: activeCabinet,
+                    intro: "Je ne peux pas traiter cette demande automatiquement. Je vous transfère au cabinet.",
+                    fallbackType: "GENERIC",
+                    endReason: "TRANSFER_FAILED",
+                    meta: { fromStep: "OTHER_ASK" },
+                });
+            }
 
-                if (!transferred) {
-                    trackFailedOnce(session, cabinetId);
-                    trackDurationOnce(session, cabinetId);
+
+            if (session.step === "OTHER_ASK_MORE") {
+                if (!speech || !normalizeText(speech)) {
+                    const retry = await handleRetry(vr, res, session, callSid, cabinetId, "OTHER_ASK_MORE_EMPTY");
+                    if (retry) return retry;
+
+                    promptAndGather(
+                        vr,
+                        session,
+                        "Je n’ai pas bien compris. Est-ce que vous avez d'autre question ? Répondez par oui ou par non."
+                    );
+                    return sendTwiml(res, vr, callSid, session);
+                }
+
+                const yesNo = parseYesNo(speech);
+                const t = normalizeText(speech);
+
+                const wantsAnotherQuestion =
+                    yesNo === true ||
+                    t.includes("oui") ||
+                    t.includes("j'ai une autre question") ||
+                    t.includes("j ai une autre question") ||
+                    t.includes("encore une question") ||
+                    t.includes("autre question");
+
+                if (wantsAnotherQuestion) {
+                    setStep(session, callSid, "OTHER_ASK", {
+                        trigger: "USER_HAS_ANOTHER_QUESTION",
+                    });
+
+                    promptAndGather(
+                        vr,
+                        session,
+                        "Quelle est votre question ?",
+                        "Je vous écoute."
+                    );
+                    return sendTwiml(res, vr, callSid, session);
+                }
+
+                if (yesNo === false || t.includes("non")) {
+                    await trackDurationOnce(session, cabinetId);
 
                     return endCall(
                         vr,
                         res,
                         callSid,
                         session,
-                        "TRANSFER_NUMBER_MISSING",
-                        getTransferFallback(session, "GENERIC"),
-                        { fromStep: "OTHER_ASK" }
+                        "OTHER_COMPLETED",
+                        "Pas de souci. Au revoir."
                     );
                 }
 
-                trackHandledOnce(session, cabinetId);
-                trackDurationOnce(session, cabinetId);
+                const retry = await handleRetry(vr, res, session, callSid, cabinetId, "OTHER_ASK_MORE");
+                if (retry) return retry;
+
+                promptAndGather(
+                    vr,
+                    session,
+                    "Je n’ai pas bien compris. Est-ce que vous avez d'autre question ?"
+                );
                 return sendTwiml(res, vr, callSid, session);
             }
 
@@ -3961,8 +4186,8 @@ router.post("/voice", async (req, res) => {
                 patientName: maskName(session.patientName || ""),
             });
 
-            trackFailedOnce(session, cabinetId);
-            trackDurationOnce(session, cabinetId);
+            await trackFailedOnce(session, cabinetId);
+            await trackDurationOnce(session, cabinetId);
             logCallOutcome(callSid, "UNEXPECTED_ERROR", session, {
                 errorMessage: err?.message,
                 step: session.step,
@@ -3999,11 +4224,16 @@ router.post("/voice", async (req, res) => {
 router.post("/transfer-status", async (req, res) => {
     const vr = new twilio.twiml.VoiceResponse();
     const status = String(req.body?.DialCallStatus || "").trim().toLowerCase();
+    const callSid = safeCallSid(req);
 
     logInfo("TRANSFER_STATUS", {
-        callSid: safeCallSid(req),
+        callSid,
         dialCallStatus: status || null,
     });
+
+    if (callSid) {
+        await clearSession(callSid);
+    }
 
     if (status === "completed") {
         return sendTwiml(res, vr);
