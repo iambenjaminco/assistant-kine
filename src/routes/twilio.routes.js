@@ -475,9 +475,6 @@ async function tryTransferToCabinet({
         );
     }
 
-    await trackHandledOnce(session, cabinetId);
-    await trackDurationOnce(session, cabinetId);
-
     return sendTwiml(res, vr, callSid, session);
 }
 
@@ -1565,6 +1562,8 @@ router.post("/voice", async (req, res) => {
             vr.hangup();
             return sendTwiml(res, vr);
         }
+
+        session.cabinetId = cabinetId;
 
         if (!session.metricsTracked) {
             session.metricsTracked = {
@@ -4231,15 +4230,44 @@ router.post("/transfer-status", async (req, res) => {
         dialCallStatus: status || null,
     });
 
+    let session = null;
+    let cabinetId = null;
+
     if (callSid) {
-        await clearSession(callSid);
+        try {
+            session = await getStoredSession(callSid);
+            cabinetId = session?.cabinetId || null;
+        } catch (err) {
+            logError("TRANSFER_STATUS_SESSION_LOAD_FAILED", {
+                callSid,
+                message: err?.message,
+            });
+        }
     }
 
     if (status === "completed") {
+        if (session && cabinetId) {
+            await trackHandledOnce(session, cabinetId);
+            await trackDurationOnce(session, cabinetId);
+        }
+
+        if (callSid) {
+            await clearSession(callSid);
+        }
+
         return sendTwiml(res, vr);
     }
 
     if (status === "busy") {
+        if (session && cabinetId) {
+            await trackFailedOnce(session, cabinetId);
+            await trackDurationOnce(session, cabinetId);
+        }
+
+        if (callSid) {
+            await clearSession(callSid);
+        }
+
         sayFr(
             vr,
             "Le cabinet est actuellement en ligne. Merci de rappeler dans quelques instants."
@@ -4249,6 +4277,15 @@ router.post("/transfer-status", async (req, res) => {
     }
 
     if (status === "no-answer") {
+        if (session && cabinetId) {
+            await trackFailedOnce(session, cabinetId);
+            await trackDurationOnce(session, cabinetId);
+        }
+
+        if (callSid) {
+            await clearSession(callSid);
+        }
+
         sayFr(
             vr,
             "Le cabinet ne répond pas pour le moment. Merci de rappeler un peu plus tard."
@@ -4258,12 +4295,30 @@ router.post("/transfer-status", async (req, res) => {
     }
 
     if (status === "failed" || status === "canceled") {
+        if (session && cabinetId) {
+            await trackFailedOnce(session, cabinetId);
+            await trackDurationOnce(session, cabinetId);
+        }
+
+        if (callSid) {
+            await clearSession(callSid);
+        }
+
         sayFr(
             vr,
             "Je n'ai pas pu vous mettre en relation avec le cabinet. Merci de rappeler plus tard."
         );
         vr.hangup();
         return sendTwiml(res, vr);
+    }
+
+    if (session && cabinetId) {
+        await trackFailedOnce(session, cabinetId);
+        await trackDurationOnce(session, cabinetId);
+    }
+
+    if (callSid) {
+        await clearSession(callSid);
     }
 
     sayFr(
