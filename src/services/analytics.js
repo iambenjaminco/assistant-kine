@@ -49,19 +49,15 @@ async function addCallDuration(cabinetKey, durationSeconds) {
 
   assertSupabase();
 
-  const dateKey = getDateKeyParis();
-
   const { error } = await supabase.rpc("add_cabinet_daily_call_duration", {
     p_cabinet_id: cabinetKey,
-    p_date_key: dateKey,
-    p_duration_seconds: Math.round(durationSeconds),
+    p_seconds: Math.round(durationSeconds),
   });
 
   if (error) {
     console.error("[ANALYTICS][ADD_DURATION_ERROR]", {
       cabinetKey,
       durationSeconds,
-      dateKey,
       message: error.message,
     });
     throw new Error("ANALYTICS_ADD_DURATION_FAILED");
@@ -77,7 +73,7 @@ async function getCabinetAnalytics(cabinetKey) {
     .from("cabinet_daily_metrics")
     .select("*")
     .eq("cabinet_id", cabinetKey)
-    .order("date", { ascending: false });
+    .order("date_key", { ascending: false });
 
   if (error) {
     console.error("[ANALYTICS][GET_CABINET_ANALYTICS_ERROR]", {
@@ -113,7 +109,7 @@ async function getCabinetAnalytics(cabinetKey) {
 
   const daily = Object.fromEntries(
     rows.map((row) => [
-      row.date,
+      row.date_key,
       {
         callsReceived: row.calls_received || 0,
         callsHandled: row.calls_handled || 0,
@@ -126,7 +122,10 @@ async function getCabinetAnalytics(cabinetKey) {
     ])
   );
 
-  return { totals, daily };
+  return {
+    totals,
+    daily,
+  };
 }
 
 module.exports = {
