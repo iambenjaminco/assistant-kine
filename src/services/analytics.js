@@ -126,10 +126,7 @@ async function getCabinetAnalytics(cabinetKey) {
     ])
   );
 
-  return {
-    totals,
-    daily,
-  };
+  return { totals, daily };
 }
 
 module.exports = {
