@@ -1,5 +1,4 @@
 const express = require("express");
-const { google } = require("googleapis");
 
 const {
   buildGoogleAuthUrl,
@@ -59,16 +58,22 @@ router.get("/callback", async (req, res) => {
     const { cabinetId, practitionerKey, practitionerName } = decoded;
 
     const tokens = await exchangeGoogleCodeForTokens(code);
-    const oauth2Client = buildOAuthClientFromTokens(tokens);
 
-    const oauth2 = google.oauth2({ version: "v2", auth: oauth2Client });
-    const me = await oauth2.userinfo.get();
+    console.log("[GOOGLE_OAUTH][TOKENS_RECEIVED]", {
+      practitionerKey,
+      cabinetId,
+      hasAccessToken: Boolean(tokens?.access_token),
+      hasRefreshToken: Boolean(tokens?.refresh_token),
+      hasIdToken: Boolean(tokens?.id_token),
+      expiryDate: tokens?.expiry_date || null,
+      scope: tokens?.scope || null,
+    });
 
     await upsertPractitionerGoogleConnection({
       practitionerKey,
       cabinetId,
       practitionerName,
-      googleEmail: me.data.email || null,
+      googleEmail: null,
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       scope: tokens.scope,
@@ -77,7 +82,9 @@ router.get("/callback", async (req, res) => {
       selectedCalendarId: null,
     });
 
-    return res.send("Google Calendar connecté. Vous pouvez revenir à l’onboarding.");
+    return res.send(
+      "Google Calendar connecté avec succès. Vous pouvez revenir à l’onboarding."
+    );
   } catch (err) {
     console.error("[GOOGLE_OAUTH][CALLBACK_ERROR]", err);
     return res.status(500).send("Connexion Google impossible");
