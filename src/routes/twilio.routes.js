@@ -3042,6 +3042,8 @@ router.post("/voice", async (req, res) => {
                     try {
                         await withTimeout(
                             addCallbackNoteToEvent({
+                                cabinet: activeCabinet,
+                                practitioners: activeCabinet.practitioners,
                                 calendarId: found.calendarId,
                                 eventId: found.eventId,
                             }),
@@ -3457,6 +3459,8 @@ router.post("/voice", async (req, res) => {
 
                     const cancelOldResult = await withTimeout(
                         cancelAppointmentSafe({
+                            cabinet: activeCabinet,
+                            practitioners: activeCabinet.practitioners,
                             calendarId: oldEvent.calendarId,
                             eventId: oldEvent.eventId,
                         }),
@@ -3773,6 +3777,8 @@ router.post("/voice", async (req, res) => {
                     try {
                         await withTimeout(
                             addCallbackNoteToEvent({
+                                cabinet: activeCabinet,
+                                practitioners: activeCabinet.practitioners,
                                 calendarId: found.calendarId,
                                 eventId: found.eventId,
                             }),
@@ -3835,6 +3841,8 @@ router.post("/voice", async (req, res) => {
 
                 const cancelResult = await withTimeout(
                     cancelAppointmentSafe({
+                        cabinet: activeCabinet,
+                        practitioners: activeCabinet.practitioners,
                         calendarId: found.calendarId,
                         eventId: found.eventId,
                     }),

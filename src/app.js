@@ -5,6 +5,7 @@ const calendarRoutes = require("./routes/calendar.routes");
 const twilioRoutes = require("./routes/twilio.routes");
 const stripeRoutes = require("./routes/stripe.routes");
 const redis = require("./config/redis");
+const googleOAuthRoutes = require("./src/routes/googleOAuth.routes");
 
 
 const app = express();
@@ -43,5 +44,6 @@ app.use(express.json());
 app.use("/api/calendar", calendarRoutes);
 app.use("/twilio", twilioRoutes);
 app.use("/stripe", stripeRoutes);
+app.use("/auth/google", googleOAuthRoutes);
 
 module.exports = app;

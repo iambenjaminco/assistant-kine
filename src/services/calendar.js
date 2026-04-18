@@ -7,6 +7,14 @@ const {
     releaseSlotLock,
 } = require("./slotLock");
 
+const {
+    getPractitionerGoogleConnection,
+} = require("./practitionerGoogleConnectionsStore");
+
+const {
+    buildOAuthClientFromTokens,
+} = require("../config/googleOAuth");
+
 const DEFAULT_TIMEZONE = "Europe/Paris";
 const DEFAULT_SLOT_MINUTES = 30;
 const DEFAULT_FIRST_APPOINTMENT_MINUTES = 45;
@@ -215,6 +223,58 @@ function normalizeText(s) {
 
 function normalizePhone(s) {
     return (s || "").toString().replace(/\D/g, "");
+}
+
+function buildPractitionerKey(cabinet, practitioner) {
+    if (!cabinet?.key || !practitioner?.name) {
+        throw new Error("IMPOSSIBLE_DE_CONSTRUIRE_LE_PRACTITIONER_KEY");
+    }
+
+    return `${cabinet.key}::${normalizeText(practitioner.name)}`;
+}
+
+async function getCalendarClientForPractitioner({ cabinet, practitioner }) {
+    assertCabinet(cabinet);
+
+    if (!practitioner?.name) {
+        throw new Error("practitioner.name manquant");
+    }
+
+    const practitionerKey = buildPractitionerKey(cabinet, practitioner);
+    const connection = await getPractitionerGoogleConnection(practitionerKey);
+
+    if (!connection) {
+        throw new Error(`PRACTITIONER_GOOGLE_CONNECTION_NOT_FOUND:${practitionerKey}`);
+    }
+
+    const oauth2Client = buildOAuthClientFromTokens({
+        access_token: connection.access_token,
+        refresh_token: connection.refresh_token,
+        scope: connection.scope,
+        token_type: connection.token_type,
+        expiry_date: connection.expiry_date,
+    });
+
+    return google.calendar({ version: "v3", auth: oauth2Client });
+}
+
+async function getCalendarClientForCalendarId({ cabinet, practitioners, calendarId }) {
+    assertCabinet(cabinet);
+    assertPractitioners(practitioners);
+
+    const practitioner = practitioners.find((p) => {
+        const expectedCalendarId =
+            p.selectedCalendarId ||
+            p.calendarId;
+
+        return expectedCalendarId === calendarId;
+    });
+
+    if (!practitioner) {
+        throw new Error(`PRACTITIONER_NOT_FOUND_FOR_CALENDAR_ID:${calendarId}`);
+    }
+
+    return getCalendarClientForPractitioner({ cabinet, practitioner });
 }
 
 
@@ -1280,7 +1340,16 @@ async function getCalendarClient() {
     return google.calendar({ version: "v3", auth });
 }
 
-async function getBusyPeriods(calendar, calendarId, timeMin, timeMax, timezone) {
+async function getBusyPeriods(cabinet, practitioner, timeMin, timeMax, timezone) {
+    const calendar = await getCalendarClientForPractitioner({
+        cabinet,
+        practitioner,
+    });
+
+    const calendarId =
+        practitioner.selectedCalendarId ||
+        practitioner.calendarId;
+
     const res = await calendar.freebusy.query({
         requestBody: {
             timeMin: timeMin.toISOString(),
@@ -1376,7 +1445,19 @@ async function createAppointment({
         throw new Error("calendarId requis");
     }
     assertCabinet(cabinet);
-    const calendar = await getCalendarClient();
+    const matchingPractitioner = (cabinet?.practitioners || []).find((p) => {
+        const effectiveCalendarId = p.selectedCalendarId || p.calendarId;
+        return effectiveCalendarId === calendarId;
+    });
+
+    if (!matchingPractitioner) {
+        throw new Error(`PRACTITIONER_NOT_FOUND_FOR_CALENDAR_ID:${calendarId}`);
+    }
+
+    const calendar = await getCalendarClientForPractitioner({
+        cabinet,
+        practitioner: matchingPractitioner,
+    });
     const timezone = getTimeZoneForCabinet(cabinet);
 
     const start = new Date(startDate);
@@ -1441,7 +1522,19 @@ async function isSlotAvailable({
         throw new Error("calendarId requis");
     }
     assertCabinet(cabinet);
-    const calendar = await getCalendarClient();
+    const matchingPractitioner = (cabinet?.practitioners || []).find((p) => {
+        const effectiveCalendarId = p.selectedCalendarId || p.calendarId;
+        return effectiveCalendarId === calendarId;
+    });
+
+    if (!matchingPractitioner) {
+        throw new Error(`PRACTITIONER_NOT_FOUND_FOR_CALENDAR_ID:${calendarId}`);
+    }
+
+    const calendar = await getCalendarClientForPractitioner({
+        cabinet,
+        practitioner: matchingPractitioner,
+    });
     const timezone = getTimeZoneForCabinet(cabinet);
 
     const start = new Date(startDate);
@@ -1591,7 +1684,6 @@ async function suggestTwoSlotsNext7Days({
     assertCabinet(cabinet);
 
     const { timezone } = getCalendarContext(cabinet);
-    const calendar = await getCalendarClient();
 
     const effectiveDays = Number.isFinite(Number(days))
         ? Number(days)
@@ -1626,14 +1718,15 @@ async function suggestTwoSlotsNext7Days({
 
     const busyEntries = await Promise.all(
         practitioners.map(async (p) => {
+            const effectiveCalendarId = p.selectedCalendarId || p.calendarId;
             const busy = await getBusyPeriods(
-                calendar,
-                p.calendarId,
+                cabinet,
+                p,
                 timeMin,
                 timeMax,
                 timezone
             );
-            return [p.calendarId, busy];
+            return [effectiveCalendarId, busy];
         })
     );
 
@@ -1712,7 +1805,6 @@ async function suggestTwoSlotsFromDate({
     assertCabinet(cabinet);
 
     const { timezone } = getCalendarContext(cabinet);
-    const calendar = await getCalendarClient();
 
     const effectiveDays = Number.isFinite(Number(days))
         ? Number(days)
@@ -1762,14 +1854,15 @@ async function suggestTwoSlotsFromDate({
 
     const busyEntries = await Promise.all(
         practitioners.map(async (p) => {
+            const effectiveCalendarId = p.selectedCalendarId || p.calendarId;
             const busy = await getBusyPeriods(
-                calendar,
-                p.calendarId,
-                start,
+                cabinet,
+                p,
+                timeMin,
                 timeMax,
                 timezone
             );
-            return [p.calendarId, busy];
+            return [effectiveCalendarId, busy];
         })
     );
 
@@ -2057,8 +2150,14 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
             let res;
 
             try {
-                res = await calendar.events.list({
-                    calendarId: p.calendarId,
+                const effectiveCalendarId = p.selectedCalendarId || p.calendarId;
+                const practitionerCalendar = await getCalendarClientForPractitioner({
+                    cabinet,
+                    practitioner: p,
+                });
+
+                res = await practitionerCalendar.events.list({
+                    calendarId: effectiveCalendarId,
                     timeMin,
                     singleEvents: true,
                     orderBy: "startTime",
@@ -2097,7 +2196,7 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
                 const durationMinutes = computeEventDurationMinutes(startISO, endISO);
 
                 const candidate = {
-                    calendarId: p.calendarId,
+                    calendarId: effectiveCalendarId,
                     eventId: ev.id,
                     startISO,
                     endISO,
@@ -2158,8 +2257,12 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
     };
 }
 
-async function addCallbackNoteToEvent({ calendarId, eventId }) {
-    const calendar = await getCalendarClient();
+async function addCallbackNoteToEvent({ cabinet, practitioners, calendarId, eventId }) {
+    const calendar = await getCalendarClientForCalendarId({
+        cabinet,
+        practitioners,
+        calendarId,
+    });
 
     const { data: ev } = await calendar.events.get({
         calendarId,
@@ -2188,8 +2291,12 @@ async function addCallbackNoteToEvent({ calendarId, eventId }) {
     return { ok: true, alreadyPresent: false };
 }
 
-async function cancelAppointmentSafe({ calendarId, eventId }) {
-    const calendar = await getCalendarClient();
+async function cancelAppointmentSafe({ cabinet, practitioners, calendarId, eventId }) {
+    const calendar = await getCalendarClientForCalendarId({
+        cabinet,
+        practitioners,
+        calendarId,
+    });
 
     try {
         await calendar.events.delete({
@@ -2201,11 +2308,7 @@ async function cancelAppointmentSafe({ calendarId, eventId }) {
     } catch (error) {
         const message = error?.message || "";
 
-        // ✅ Cas déjà supprimé / introuvable
-        if (
-            message.includes("Not Found") ||
-            message.includes("404")
-        ) {
+        if (message.includes("Not Found") || message.includes("404")) {
             logWarn("DELETE_ALREADY_DONE", {
                 calendarId,
                 eventId,
