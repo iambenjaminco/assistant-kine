@@ -2054,14 +2054,31 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
         let pageToken = undefined;
 
         do {
-            const res = await calendar.events.list({
-                calendarId: p.calendarId,
-                timeMin,
-                singleEvents: true,
-                orderBy: "startTime",
-                maxResults: 50,
-                pageToken,
-            });
+            let res;
+
+            try {
+                res = await calendar.events.list({
+                    calendarId: p.calendarId,
+                    timeMin,
+                    singleEvents: true,
+                    orderBy: "startTime",
+                    maxResults: 50,
+                    pageToken,
+                });
+            } catch (err) {
+                console.error("[CALENDAR][FIND_NEXT_APPOINTMENT_LIST_ERROR]", {
+                    calendarId: p?.calendarId || null,
+                    practitionerName: p?.name || null,
+                    phone: phoneNorm,
+                    message: err?.message,
+                    code: err?.code || null,
+                    status: err?.response?.status || null,
+                });
+
+                // on ignore ce calendrier et on passe au suivant
+                pageToken = undefined;
+                break;
+            }
 
             const items = res.data.items || [];
 
@@ -2098,11 +2115,12 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
                 const bestTime = new Date(best.startISO).getTime();
                 const candTime = new Date(candidate.startISO).getTime();
 
-                if (candTime < bestTime) best = candidate;
+                if (candTime < bestTime) {
+                    best = candidate;
+                }
 
-                // ✅ optimisation : si on a déjà un RDV très proche (dans <2h), on arrête
                 if (best) {
-                    const nowTime = new Date().getTime();
+                    const nowTime = Date.now();
                     if (new Date(best.startISO).getTime() - nowTime < 2 * 60 * 60 * 1000) {
                         return {
                             calendarId: best.calendarId,
