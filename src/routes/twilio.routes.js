@@ -2901,6 +2901,15 @@ router.post("/voice", async (req, res) => {
             }
 
             if (session.step === "MODIFY_FIND_APPT") {
+                logInfo("MODIFY_FIND_APPT_INPUT", {
+                    callSid,
+                    cabinetId,
+                    phone: maskPhone(session.phone),
+                    practitioners: (activeCabinet.practitioners || []).map((p) => ({
+                        name: p?.name || null,
+                        calendarId: p?.calendarId || null,
+                    })),
+                });
                 const found = await withTimeout(
                     findNextAppointmentSafe({
                         cabinet: activeCabinet,
