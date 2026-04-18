@@ -39,7 +39,9 @@ async function incrementMetric(cabinetKey, metric, amount = 1) {
       dateKey,
       message: error.message,
     });
-    throw new Error("ANALYTICS_INCREMENT_FAILED");
+    console.error("ANALYTICS_INCREMENT_FAILED");
+    // NE PAS throw
+    return;
   }
 }
 
@@ -60,7 +62,8 @@ async function addCallDuration(cabinetKey, durationSeconds) {
       durationSeconds,
       message: error.message,
     });
-    throw new Error("ANALYTICS_ADD_DURATION_FAILED");
+    console.error("ANALYTICS_ADD_DURATION_FAILED");
+    return;
   }
 }
 
