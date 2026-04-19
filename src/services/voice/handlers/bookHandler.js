@@ -50,7 +50,6 @@ async function handleBookStep(ctx) {
         tryTransferToCabinet,
         gatherSpeech,
         sayFr,
-        isExplicitDateRequest,
         parseRequestedDate,
         hasPreferenceRefinementRequest,
         detectAlternativeRequest,
@@ -477,6 +476,431 @@ async function handleBookStep(ctx) {
             "Souhaitez-vous un autre praticien du cabinet, attendre un créneau plus tard, ou être mis en relation avec le cabinet ?"
         );
         return sendTwiml(res, vr, callSid, session);
+    }
+
+    if (session.step === "BOOK_PICK_SLOT") {
+        const t = normalizeText(speech);
+        const requestedDateISO = parseRequestedDate(speech) || parseRequestedDate(t);
+
+        const wantsRepeat =
+            t.includes("repete") ||
+            t.includes("repeter") ||
+            t.includes("pardon") ||
+            t.includes("recommence") ||
+            t.includes("pas compris") ||
+            t.includes("vous pouvez repeter");
+
+        if (wantsRepeat) {
+            const firstSlot = session.slots?.[0];
+
+            if (!firstSlot) {
+                return null;
+            }
+
+            const prompt = getSlotSelectionPrompt(session);
+            const gather = gatherSpeech(vr, "/twilio/voice");
+            sayFr(gather, "Je répète.");
+            saySlotsOnNode(gather, session.slots);
+            sayFr(gather, prompt);
+
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        if (requestedDateISO) {
+            return proposeSlotsFromRequestedDate({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet: activeCabinet,
+                requestedDateISO,
+                nextStep: "BOOK_PICK_SLOT",
+                intro: "Je regarde cette date.",
+                emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
+            });
+        }
+
+        if (hasPreferenceRefinementRequest(t)) {
+            session.slots = [];
+            session.pendingSlot = null;
+            session.requestedDateISO = null;
+
+            return proposeBookingSlots({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet: activeCabinet,
+            });
+        }
+
+        if (detectAlternativeRequest(t)) {
+            session.pendingSlot = null;
+
+            if (session.lastProposedStartISO) {
+                return proposeSlotsFromRequestedDate({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                    requestedDateISO: session.lastProposedStartISO,
+                    nextStep: "BOOK_PICK_SLOT",
+                    intro: "Je regarde d'autres créneaux le même jour.",
+                    emptyMessage: "Je n’ai pas trouvé d’autre disponibilité ce jour-là.",
+                });
+            }
+
+            setStep(session, callSid, "BOOK_ASK_PREFERRED_DATE", {
+                trigger: "ALTERNATIVE_REQUEST_WITHOUT_LAST_PROPOSED_DATE",
+            });
+
+            promptAndGather(
+                vr,
+                session,
+                "D'accord. Donnez-moi un autre jour ou un autre horaire qui vous conviendrait."
+            );
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        const choice = pickChoiceFromSpeech(
+            speech,
+            digits,
+            session.slots,
+            normalizeText,
+            {
+                getSlotWeekdayFR: (start) => getSlotWeekdayFR(start, PARIS_TIMEZONE),
+                getSlotHourMinuteFR: (start) => getSlotHourMinuteFR(start, PARIS_TIMEZONE),
+                getHourInParis: (start) => getHourInParis(start, PARIS_TIMEZONE),
+            }
+        );
+
+        if (choice === null) {
+            const a = session.slots?.[0];
+            const b = session.slots?.[1] || session.slots?.[0];
+
+            if (!a) {
+                session.slots = [];
+                session.pendingSlot = null;
+                session.requestedDateISO = null;
+
+                sayFr(vr, "Je relance une recherche de disponibilités.");
+                return proposeBookingSlots({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                });
+            }
+
+            const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_PICK_SLOT");
+            if (retry) return retry;
+
+            const prompt = getSlotSelectionPrompt(session);
+            const gather = gatherSpeech(vr, "/twilio/voice");
+            sayFr(gather, "Je n'ai pas bien compris.");
+            sayFr(
+                gather,
+                `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou un autre jour.`
+            );
+            sayFr(gather, prompt);
+
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        const slot = session.slots?.[choice];
+
+        if (!slot || !slot.calendarId) {
+            session.pendingSlot = null;
+            session.slots = [];
+            session.requestedDateISO = null;
+
+            sayFr(vr, "Ce créneau vient d’être pris. Je regarde d’autres disponibilités.");
+            return proposeBookingSlots({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet: activeCabinet,
+            });
+        }
+
+        session.pendingSlot = slot;
+        setStep(session, callSid, "BOOK_ASK_NAME", {
+            trigger: "SLOT_SELECTED",
+            selectedSlot: summarizeSlot(slot),
+        });
+
+        promptAndGather(
+            vr,
+            session,
+            "Quel est votre nom et prénom ?",
+            pickVariant(session, "name_intro", ["Très bien.", "Parfait.", "D'accord."])
+        );
+        return sendTwiml(res, vr, callSid, session);
+    }
+
+    if (session.step === "BOOK_ASK_PREFERRED_DATE") {
+        const requestedDateISO = parseRequestedDate(speech);
+
+        if (!requestedDateISO && hasPreferenceRefinementRequest(speech)) {
+            session.slots = [];
+            session.pendingSlot = null;
+            session.requestedDateISO = null;
+
+            return proposeBookingSlots({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet: activeCabinet,
+            });
+        }
+
+        if (!requestedDateISO) {
+            const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_ASK_PREFERRED_DATE");
+            if (retry) return retry;
+
+            promptAndGatherDate(
+                vr,
+                session,
+                "Je n’ai pas compris le jour demandé. Vous pouvez dire par exemple demain, lundi prochain, mardi après-midi, ou une date précise."
+            );
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        return proposeSlotsFromRequestedDate({
+            vr,
+            res,
+            session,
+            callSid,
+            cabinet: activeCabinet,
+            requestedDateISO,
+            nextStep: "BOOK_PICK_SLOT",
+            intro: "Je regarde.",
+            emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
+        });
+    }
+
+    if (session.step === "BOOK_ASK_NAME") {
+        const name = (speech || "").trim();
+
+        if (!isLikelyValidPatientName(name)) {
+            const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_ASK_NAME");
+            if (retry) return retry;
+
+            promptAndGather(
+                vr,
+                session,
+                "Je n’ai pas bien compris. Merci de me dire votre nom et prénom."
+            );
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        session.patientName = name;
+        session.phonePurpose = "BOOK";
+
+        setStep(session, callSid, "BOOK_ASK_PHONE", {
+            trigger: "PATIENT_NAME_CAPTURED",
+            patientName: name,
+        });
+
+        promptAndGather(
+            vr,
+            session,
+            "Quel est votre numéro de téléphone ?",
+            pickVariant(session, "book_phone_intro", ["Merci.", "Parfait, merci.", "C'est noté."])
+        );
+        return sendTwiml(res, vr, callSid, session);
+    }
+
+    if (session.step === "BOOK_ASK_PHONE") {
+        const phone = parsePhone(speech, digits);
+
+        if (!phone) {
+            const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_ASK_PHONE");
+            if (retry) return retry;
+
+            promptAndGather(
+                vr,
+                session,
+                "Je n’ai pas bien compris. Merci de me redonner votre numéro de téléphone chiffre par chiffre."
+            );
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        session.phoneCandidate = phone;
+        setStep(session, callSid, "BOOK_CONFIRM_PHONE", {
+            trigger: "PHONE_PARSED",
+            phone,
+        });
+
+        promptAndGather(vr, session, getPhoneConfirmPrompt(phone));
+        return sendTwiml(res, vr, callSid, session);
+    }
+
+    if (session.step === "BOOK_CONFIRM_PHONE") {
+        const yesNo = parseYesNo(speech);
+
+        if (yesNo === null) {
+            const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_CONFIRM_PHONE");
+            if (retry) return retry;
+
+            promptAndGather(
+                vr,
+                session,
+                "Je n’ai pas bien compris. Merci de répondre simplement par oui ou par non."
+            );
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        if (!yesNo) {
+            session.phoneCandidate = "";
+            setStep(session, callSid, "BOOK_ASK_PHONE", {
+                trigger: "PHONE_CONFIRMATION_REJECTED",
+            });
+
+            promptAndGather(
+                vr,
+                session,
+                "D'accord. Redonnez-moi votre numéro de téléphone chiffre par chiffre."
+            );
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        session.phone = session.phoneCandidate;
+        session.phoneCandidate = "";
+
+        return finalizeBooking(vr, res, session, callSid, activeCabinet, cabinetId);
+    }
+
+    if (session.step === "BOOK_PICK_ALT") {
+        const t = normalizeText(speech);
+        const requestedDateISO = parseRequestedDate(speech) || parseRequestedDate(t);
+
+        if (requestedDateISO) {
+            return proposeSlotsFromRequestedDate({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet: activeCabinet,
+                requestedDateISO,
+                nextStep: "BOOK_PICK_ALT",
+                intro: "Je regarde cette date.",
+                emptyMessage: "Je n’ai pas trouvé de disponibilité à cette date.",
+            });
+        }
+
+        if (hasPreferenceRefinementRequest(t)) {
+            session.slots = [];
+            session.pendingSlot = null;
+            session.requestedDateISO = null;
+
+            return proposeBookingSlots({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet: activeCabinet,
+            });
+        }
+
+        if (detectAlternativeRequest(t)) {
+            session.pendingSlot = null;
+
+            if (session.lastProposedStartISO) {
+                return proposeSlotsFromRequestedDate({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                    requestedDateISO: session.lastProposedStartISO,
+                    nextStep: "BOOK_PICK_ALT",
+                    intro: "Je regarde d'autres créneaux le même jour.",
+                    emptyMessage: "Je n’ai pas trouvé d’autre disponibilité ce jour-là.",
+                });
+            }
+
+            setStep(session, callSid, "BOOK_ASK_PREFERRED_DATE", {
+                trigger: "ALT_REQUEST_WITHOUT_LAST_PROPOSED_DATE",
+            });
+
+            promptAndGather(
+                vr,
+                session,
+                "D'accord. Donnez-moi un autre jour ou un autre horaire qui vous conviendrait."
+            );
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        const choice = pickChoiceFromSpeech(
+            speech,
+            digits,
+            session.slots,
+            normalizeText,
+            {
+                getSlotWeekdayFR: (start) => getSlotWeekdayFR(start, PARIS_TIMEZONE),
+                getSlotHourMinuteFR: (start) => getSlotHourMinuteFR(start, PARIS_TIMEZONE),
+                getHourInParis: (start) => getHourInParis(start, PARIS_TIMEZONE),
+            }
+        );
+
+        if (choice === null) {
+            const a = session.slots?.[0];
+            const b = session.slots?.[1] || session.slots?.[0];
+
+            if (!a) {
+                session.slots = [];
+                session.pendingSlot = null;
+                session.requestedDateISO = null;
+
+                sayFr(vr, "Je relance une recherche de disponibilités.");
+                return proposeBookingSlots({
+                    vr,
+                    res,
+                    session,
+                    callSid,
+                    cabinet: activeCabinet,
+                });
+            }
+
+            const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_PICK_ALT");
+            if (retry) return retry;
+
+            const prompt = getSlotSelectionPrompt(session);
+            const gather = gatherSpeech(vr, "/twilio/voice");
+            sayFr(gather, "Je n'ai pas bien compris.");
+            sayFr(
+                gather,
+                `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou un autre jour.`
+            );
+            sayFr(gather, prompt);
+
+            return sendTwiml(res, vr, callSid, session);
+        }
+
+        const slot = session.slots?.[choice];
+
+        if (!slot || !slot.calendarId) {
+            session.pendingSlot = null;
+            session.slots = [];
+            session.requestedDateISO = null;
+
+            sayFr(vr, "Ce créneau vient d’être pris. Je regarde d’autres disponibilités.");
+            return proposeBookingSlots({
+                vr,
+                res,
+                session,
+                callSid,
+                cabinet: activeCabinet,
+            });
+        }
+
+        session.pendingSlot = slot;
+        return finalizeBooking(vr, res, session, callSid, activeCabinet, cabinetId);
     }
 
     return null;
