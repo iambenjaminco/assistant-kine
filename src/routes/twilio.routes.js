@@ -40,6 +40,11 @@ const {
 } = require("../services/voice/handlers/bookHandler");
 
 const {
+    isModifyStep,
+    handleModifyStep,
+} = require("../services/voice/handlers/modifyHandler");
+
+const {
     detectNoPractitionerPreference,
     detectUsualPractitionerIntent,
     findPractitionerBySpeech,
