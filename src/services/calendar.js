@@ -241,14 +241,20 @@ async function getCalendarClientForPractitioner({ cabinet, practitioner }) {
     assertCabinet(cabinet);
 
     if (!practitioner?.name) {
-        throw new Error("practitioner.name manquant");
+        const err = new Error("practitioner.name manquant");
+        err.code = "PRACTITIONER_NAME_MISSING";
+        throw err;
     }
 
     const connection = await getPractitionerConnectionOrNull(cabinet, practitioner);
 
     if (!connection) {
         const practitionerKey = buildPractitionerKey(cabinet, practitioner);
-        throw new Error(`PRACTITIONER_GOOGLE_CONNECTION_NOT_FOUND:${practitionerKey}`);
+        const err = new Error(`PRACTITIONER_GOOGLE_CONNECTION_NOT_FOUND:${practitionerKey}`);
+        err.code = "PRACTITIONER_GOOGLE_CONNECTION_NOT_FOUND";
+        err.practitionerKey = practitionerKey;
+        err.practitionerName = practitioner?.name || null;
+        throw err;
     }
 
     const oauth2Client = buildOAuthClientFromTokens({
@@ -1359,17 +1365,50 @@ function getEffectivePractitionerCalendarId(practitioner, connection = null) {
 }
 
 async function getBusyPeriods(cabinet, practitioner, timeMin, timeMax, timezone) {
-    const { calendar, connection } = await getCalendarClientForPractitioner({
-        cabinet,
-        practitioner,
-    });
+    let calendar;
+    let connection;
+
+    try {
+        const result = await getCalendarClientForPractitioner({
+            cabinet,
+            practitioner,
+        });
+
+        calendar = result.calendar;
+        connection = result.connection;
+    } catch (err) {
+        if (err?.code === "PRACTITIONER_GOOGLE_CONNECTION_NOT_FOUND") {
+            console.warn("[CALENDAR][PRACTITIONER_SKIPPED_NO_GOOGLE_CONNECTION]", {
+                cabinetKey: cabinet?.key || null,
+                practitionerName: practitioner?.name || null,
+                practitionerKey: err?.practitionerKey || null,
+            });
+
+            return {
+                calendarId: null,
+                busy: [],
+                skipped: true,
+                skipReason: "PRACTITIONER_GOOGLE_CONNECTION_NOT_FOUND",
+            };
+        }
+
+        throw err;
+    }
 
     const calendarId = getEffectivePractitionerCalendarId(practitioner, connection);
 
     if (!calendarId) {
-        throw new Error(
-            `CALENDAR_ID_MANQUANT_POUR_PRACTITIONER:${practitioner?.name || "unknown"}`
-        );
+        console.warn("[CALENDAR][PRACTITIONER_SKIPPED_NO_CALENDAR_ID]", {
+            cabinetKey: cabinet?.key || null,
+            practitionerName: practitioner?.name || null,
+        });
+
+        return {
+            calendarId: null,
+            busy: [],
+            skipped: true,
+            skipReason: "CALENDAR_ID_MANQUANT_POUR_PRACTITIONER",
+        };
     }
 
     const res = await calendar.freebusy.query({
@@ -1385,6 +1424,8 @@ async function getBusyPeriods(cabinet, practitioner, timeMin, timeMax, timezone)
     return {
         calendarId,
         busy: cal?.busy ?? [],
+        skipped: false,
+        skipReason: null,
     };
 }
 
@@ -1867,7 +1908,7 @@ async function suggestTwoSlotsFromDate({
     });
     const timeMax = addDaysInTimezone(start, effectiveDays, timezone);
 
-    const busyEntries = await Promise.all(
+    const busyResults = await Promise.all(
         practitioners.map(async (p) => {
             const result = await getBusyPeriods(
                 cabinet,
@@ -1876,11 +1917,42 @@ async function suggestTwoSlotsFromDate({
                 timeMax,
                 timezone
             );
-            return [result.calendarId, result.busy];
+
+            return {
+                practitioner: p,
+                ...result,
+            };
         })
     );
 
-    const busyByCal = Object.fromEntries(busyEntries);
+    const activeBusyResults = busyResults.filter(
+        (entry) => !entry.skipped && entry.calendarId
+    );
+
+    const activePractitioners = activeBusyResults.map((entry) => entry.practitioner);
+
+    if (!activePractitioners.length) {
+        logWarn("SUGGEST_FROM_DATE_NO_CONNECTED_PRACTITIONER", {
+            cabinetKey: cabinet?.key || null,
+            requestedDateKey: getDateKeyInTimezone(start, timezone),
+            practitionersCount: practitioners.length,
+        });
+
+        return buildSuggestResponse({
+            status: "NO_CONNECTED_PRACTITIONER",
+            slots: [],
+            speech: "Aucun praticien du cabinet n'est actuellement connecté au calendrier.",
+            context: {
+                cabinetKey: cabinet?.key || null,
+                timezone,
+                requestedDateKey: getDateKeyInTimezone(start, timezone),
+            },
+        });
+    }
+
+    const busyByCal = Object.fromEntries(
+        activeBusyResults.map((entry) => [entry.calendarId, entry.busy])
+    );
 
     const candidates = generateDynamicCandidateSlots({
         startDate: start,
@@ -1938,7 +2010,7 @@ async function suggestTwoSlotsFromDate({
 
     const availableAll = selectAvailableSlots({
         candidates,
-        practitioners,
+        practitioners: activePractitioners,
         busyByCal,
         cutoff: effectiveCutoff,
         maxSuggestions: Math.max(effectiveMaxSuggestions, 8),
@@ -2003,7 +2075,7 @@ async function suggestTwoSlotsFromDate({
 
         const exactSlots = buildExactRequestedSlots({
             requestedDate: { start: exactStart, end: exactEnd },
-            practitioners,
+            practitioners: activePractitioners,
             busyByCal,
         }).filter((slot) => slot.start >= effectiveCutoff);
 
