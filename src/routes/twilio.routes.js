@@ -1958,6 +1958,7 @@ router.post("/voice", async (req, res) => {
                     summarizeSlot,
                     summarizeSlots,
                     sayFr,
+                    sayGoodbye,
                     bookAppointmentSafe,
                     hasProcessedAction,
                     markProcessedAction,

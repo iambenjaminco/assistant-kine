@@ -57,6 +57,7 @@ async function handleModifyStep(ctx) {
         summarizeSlot,
         summarizeSlots,
         sayFr,
+        sayGoodbye,
         bookAppointmentSafe,
         hasProcessedAction,
         markProcessedAction,
