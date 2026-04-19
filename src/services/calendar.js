@@ -1358,26 +1358,6 @@ function getEffectivePractitionerCalendarId(practitioner, connection = null) {
     );
 }
 
-function findPractitionerByCalendarId(cabinet, calendarId) {
-    const practitioners = Array.isArray(cabinet?.practitioners)
-        ? cabinet.practitioners
-        : [];
-
-    return practitioners.find((p) => getEffectivePractitionerCalendarId(p) === calendarId) || null;
-}
-
-async function getCalendarClientForCalendarId({ cabinet, calendarId }) {
-    assertCabinet(cabinet);
-
-    const practitioner = findPractitionerByCalendarId(cabinet, calendarId);
-
-    if (!practitioner) {
-        throw new Error(`PRACTITIONER_NOT_FOUND_FOR_CALENDAR_ID:${calendarId}`);
-    }
-
-    return getCalendarClientForPractitioner({ cabinet, practitioner });
-}
-
 async function getBusyPeriods(cabinet, practitioner, timeMin, timeMax, timezone) {
     const { calendar, connection } = await getCalendarClientForPractitioner({
         cabinet,
@@ -2181,8 +2161,7 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
         const connection = await getPractitionerConnectionOrNull(cabinet, p);
         const effectiveCalendarId = getEffectivePractitionerCalendarId(p, connection);
         if (!effectiveCalendarId) {
-            pageToken = undefined;
-            break;
+            continue;
         }
 
         do {
