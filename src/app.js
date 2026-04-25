@@ -1,6 +1,6 @@
 // src/app.js
 
-// ✅ SENTRY — en tout premier, avant tout le reste
+// ✅ SENTRY — en tout premier
 const Sentry = require("@sentry/node");
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
@@ -9,6 +9,7 @@ Sentry.init({
 });
 
 const express = require("express");
+const twilio = require("twilio");
 const calendarRoutes = require("./routes/calendar.routes");
 const twilioRoutes = require("./routes/twilio.routes");
 const stripeRoutes = require("./routes/stripe.routes");
@@ -17,7 +18,6 @@ const googleOAuthRoutes = require("./routes/googleOAuth.routes");
 
 const app = express();
 
-// Logger simple
 function pickCallSid(req) {
   return req.body?.CallSid || null;
 }
@@ -35,7 +35,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Santé serveur
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
@@ -53,11 +52,36 @@ app.use(express.json());
 
 // Routes principales
 app.use("/api/calendar", calendarRoutes);
+
+// ✅ Validation signature Twilio
+app.use("/twilio", (req, res, next) => {
+  const twilioSignature = req.headers["x-twilio-signature"];
+  const url = `${process.env.APP_BASE_URL}${req.originalUrl}`;
+  const params = req.body || {};
+
+  const isValid = twilio.validateRequest(
+    process.env.TWILIO_AUTH_TOKEN,
+    twilioSignature,
+    url,
+    params
+  );
+
+  if (!isValid) {
+    console.warn("[TWILIO][INVALID_SIGNATURE]", {
+      url,
+      signature: twilioSignature,
+    });
+    return res.status(403).send("Forbidden");
+  }
+
+  next();
+});
+
 app.use("/twilio", twilioRoutes);
 app.use("/stripe", stripeRoutes);
 app.use("/auth/google", googleOAuthRoutes);
 
-// ✅ SENTRY — gestionnaire d'erreurs, après toutes les routes
+// ✅ SENTRY — après toutes les routes
 Sentry.setupExpressErrorHandler(app);
 
 module.exports = app;
