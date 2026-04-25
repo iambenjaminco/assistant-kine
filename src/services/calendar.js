@@ -876,9 +876,10 @@ function isWithinRangesByMinutes(targetStartMinutes, targetEndMinutes, ranges = 
             return false;
         }
 
+        // ✅ PAR :
         return (
             targetStartMinutes >= startMinutes &&
-            targetEndMinutes <= endMinutes
+            targetEndMinutes < endMinutes
         );
     });
 }

@@ -152,12 +152,20 @@ function pickChoiceFromSpeech(text, digits, slots = [], normalizeText, helpers) 
         const aName = normalizeText(a.practitionerName || "");
         const bName = normalizeText(b.practitionerName || "");
 
+        // ✅ PAR :
+        // Combinaison jour + heure — "mardi 11h"
+        if (aDay && aHm && t.includes(aDay) && (t.includes(aHm) || t.includes(aHourOnly))) return 0;
+        if (bDay && bHm && t.includes(bDay) && (t.includes(bHm) || t.includes(bHourOnly))) return 1;
+
+        // Jour seul
         if (aDay && t.includes(aDay) && (!bDay || !t.includes(bDay))) return 0;
         if (bDay && t.includes(bDay) && (!aDay || !t.includes(aDay))) return 1;
 
+        // Heure exacte (ex: "11h30")
         if (aHm && (t.includes(aHm) || t.includes(aHm.replace("h", " h ")))) return 0;
         if (bHm && (t.includes(bHm) || t.includes(bHm.replace("h", " h ")))) return 1;
 
+        // Heure ronde (ex: "11h")
         if (aHourOnly && t.includes(aHourOnly) && (!bHourOnly || !t.includes(bHourOnly))) return 0;
         if (bHourOnly && t.includes(bHourOnly) && (!aHourOnly || !t.includes(aHourOnly))) return 1;
 

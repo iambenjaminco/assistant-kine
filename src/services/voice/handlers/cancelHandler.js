@@ -121,6 +121,7 @@ async function handleCancelStep(ctx) {
             return sendTwiml(res, vr, callSid, session);
         }
 
+        // ✅ PAR :
         session.phone = session.phoneCandidate;
         session.phoneCandidate = "";
         setStep(session, callSid, "CANCEL_FIND_APPT", {
@@ -128,6 +129,7 @@ async function handleCancelStep(ctx) {
             phone: maskPhone(session.phone),
         });
         setPrompt(session, "");
+        sayFr(vr, "Très bien, je recherche votre rendez-vous. Veuillez patienter un instant.");
         vr.redirect({ method: "POST" }, "/twilio/voice");
         return sendTwiml(res, vr, callSid, session);
     }
