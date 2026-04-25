@@ -1128,6 +1128,8 @@ function selectAvailableSlots({
 
         for (const p of orderedPractitioners) {
             const effectiveCalendarId = getEffectivePractitionerCalendarId(p);
+            if (!effectiveCalendarId) continue;
+
             const busy = busyByCal[effectiveCalendarId] || [];
             if (isSlotBusy(c.start, c.end, busy)) continue;
 
@@ -1438,6 +1440,8 @@ function buildExactRequestedSlots({
 
     for (const practitioner of buildOrderedPractitioners(practitioners)) {
         const effectiveCalendarId = getEffectivePractitionerCalendarId(practitioner);
+        if (!effectiveCalendarId) continue;
+
         const busy = busyByCal[effectiveCalendarId] || [];
         if (isSlotBusy(requestedDate.start, requestedDate.end, busy)) continue;
 
@@ -1642,7 +1646,24 @@ async function bookAppointmentSafe({
         end.setMinutes(end.getMinutes() + effectiveMinutes);
     }
 
-    const { ok: gotLock, token } = await acquireSlotLock(calendarId, start, end, 60_000);
+    let gotLock = false;
+    let token = null;
+
+    try {
+        const lockResult = await acquireSlotLock(calendarId, start, end, 60_000);
+        gotLock = Boolean(lockResult?.ok);
+        token = lockResult?.token || null;
+    } catch (err) {
+        logError("BOOK_SLOT_LOCK_ERROR", {
+            cabinetKey: effectiveCabinet?.key || null,
+            calendarId,
+            startISO: start.toISOString(),
+            endISO: end.toISOString(),
+            message: err?.message,
+        });
+
+        return { ok: false, code: "LOCK_ERROR" };
+    }
 
     if (!gotLock) {
         logWarn("BOOK_SLOT_LOCKED", {
@@ -1686,7 +1707,9 @@ async function bookAppointmentSafe({
 
         return { ok: true, event };
     } finally {
-        await releaseSlotLock(calendarId, start, end, token);
+        if (token) {
+            await releaseSlotLock(calendarId, start, end, token);
+        }
     }
 }
 
@@ -1773,20 +1796,27 @@ async function suggestTwoSlotsNext7Days({
     const timeMin = new Date(now);
     const timeMax = addDaysInTimezone(now, effectiveDays, timezone);
 
-    const busyEntries = await Promise.all(
+    // ✅ NOUVEAU BLOC — résistant aux erreurs Google Calendar
+    const busyResults = await Promise.all(
         practitioners.map(async (p) => {
-            const result = await getBusyPeriods(
-                cabinet,
-                p,
-                timeMin,
-                timeMax,
-                timezone
-            );
-            return [result.calendarId, result.busy];
+            try {
+                const result = await getBusyPeriods(cabinet, p, timeMin, timeMax, timezone);
+                return result;
+            } catch (err) {
+                logWarn("BUSY_PERIODS_FAILED_PRACTITIONER_SKIPPED", {
+                    practitionerName: p?.name || null,
+                    cabinetKey: cabinet?.key || null,
+                    message: err?.message,
+                });
+                return { calendarId: null, busy: [], skipped: true };
+            }
         })
     );
 
-    const busyByCal = Object.fromEntries(busyEntries);
+    const activeBusyResults = busyResults.filter(r => !r.skipped && r.calendarId);
+    const busyByCal = Object.fromEntries(
+        activeBusyResults.map(r => [r.calendarId, r.busy])
+    );
     const candidates = generateDynamicCandidateSlots({
         startDate: now,
         days: effectiveDays,
@@ -2305,24 +2335,6 @@ async function findNextAppointmentSafe({ cabinet, practitioners, phone }) {
 
                 if (candTime < bestTime) {
                     best = candidate;
-                }
-
-                if (best) {
-                    const nowTime = Date.now();
-                    if (new Date(best.startISO).getTime() - nowTime < 2 * 60 * 60 * 1000) {
-                        return {
-                            calendarId: best.calendarId,
-                            eventId: best.eventId,
-                            startISO: best.startISO,
-                            endISO: best.endISO,
-                            summary: best.summary,
-                            patientName: best.patientName,
-                            appointmentType: best.appointmentType,
-                            durationMinutes: best.durationMinutes,
-                            timezone,
-                            cabinetKey: cabinet?.key || null,
-                        };
-                    }
                 }
             }
 

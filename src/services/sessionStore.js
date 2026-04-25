@@ -35,7 +35,7 @@ function cleanupExpiredMemorySession(callSid) {
 
 function saveToMemory(callSid, session) {
   memoryStore.set(getKey(callSid), {
-    value: session,
+    value: JSON.parse(JSON.stringify(session)),
     expiresAt: getMemoryExpiry(),
   });
 }
@@ -43,7 +43,22 @@ function saveToMemory(callSid, session) {
 function validateSessionShape(session) {
   if (!session || typeof session !== "object") return false;
   if (typeof session.step !== "string" || !session.step.trim()) return false;
-  if (typeof session.createdAt !== "number") return false;
+  if (typeof session.createdAt !== "number" || !Number.isFinite(session.createdAt)) return false;
+
+  if (
+    session.metricsTracked !== undefined &&
+    (typeof session.metricsTracked !== "object" || session.metricsTracked === null)
+  ) {
+    return false;
+  }
+
+  if (
+    session.processedActions !== undefined &&
+    (typeof session.processedActions !== "object" || session.processedActions === null || Array.isArray(session.processedActions))
+  ) {
+    return false;
+  }
+
   return true;
 }
 
@@ -112,6 +127,7 @@ async function saveSession(callSid, session) {
     return false;
   }
 
+  // ✅ PAR :
   if (!redis) {
     if (canUseMemoryFallback()) {
       console.warn("[SESSION_STORE][REDIS_UNAVAILABLE][DEV_FALLBACK_SAVE]", {
@@ -121,7 +137,8 @@ async function saveSession(callSid, session) {
       return true;
     }
 
-    throw new Error("SESSION_STORE_UNAVAILABLE");
+    console.error("[SESSION_STORE][REDIS_UNAVAILABLE_PROD]", { callSid });
+    return false;
   }
 
   try {
@@ -131,6 +148,14 @@ async function saveSession(callSid, session) {
       "EX",
       SESSION_TTL_SECONDS
     );
+
+    if (!IS_PROD) {
+      console.log("[SESSION_STORE][SAVE_OK]", {
+        callSid,
+        ttlSeconds: SESSION_TTL_SECONDS,
+      });
+    }
+
     return true;
   } catch (err) {
     console.error("[SESSION_STORE][SAVE_ERROR]", {

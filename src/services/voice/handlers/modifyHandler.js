@@ -229,8 +229,8 @@ async function handleModifyStep(ctx) {
         setPrompt(session, prompt);
 
         const gather = gatherSpeech(vr, "/twilio/voice");
-        gather.say({ language: "fr-FR", voice: "Google.fr-FR-Wavenet-A" }, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
-        gather.say({ language: "fr-FR", voice: "Google.fr-FR-Wavenet-A" }, prompt);
+        sayFr(gather, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
+        sayFr(gather, prompt);
 
         return sendTwiml(res, vr, callSid, session);
     }
@@ -439,11 +439,11 @@ async function handleModifyStep(ctx) {
 
         const gather = gatherSpeech(vr, "/twilio/voice");
 
-        gather.say({ language: "fr-FR", voice: "Google.fr-FR-Wavenet-A" }, "Très bien.");
+        sayFr(gather, "Très bien.");
 
         if (usedAnyPractitionerFallback) {
-            gather.say(
-                { language: "fr-FR", voice: "Google.fr-FR-Wavenet-A" },
+            sayFr(
+                gather,
                 "Je n'ai pas trouvé de disponibilité rapidement avec le même kiné. Je regarde avec un autre praticien du cabinet."
             );
         }
@@ -456,21 +456,22 @@ async function handleModifyStep(ctx) {
             !Number.isFinite(session.preferredHourMinutes) &&
             !session.priorityPreference
         ) {
-            gather.say({ language: "fr-FR", voice: "Google.fr-FR-Wavenet-A" }, cleaned);
+            sayFr(gather, cleaned);
         } else {
             saySlotsOnNode(gather, session.slots);
         }
 
-        gather.say({ language: "fr-FR", voice: "Google.fr-FR-Wavenet-A" }, prompt);
+        sayFr(gather, prompt);
 
         return sendTwiml(res, vr, callSid, session);
     }
 
     if (session.step === "MODIFY_PICK_NEW") {
         const t = normalizeText(speech);
-        const requestedDateISO = parseRequestedDate(speech) || parseRequestedDate(t);
+        const requestedDateISO = parseRequestedDate(speech);
 
         if (requestedDateISO) {
+            session.pendingSlot = null;
             return proposeSlotsFromRequestedDate({
                 vr,
                 res,
@@ -559,12 +560,12 @@ async function handleModifyStep(ctx) {
             setPrompt(session, prompt);
 
             const gather = gatherSpeech(vr, "/twilio/voice");
-            gather.say({ language: "fr-FR", voice: "Google.fr-FR-Wavenet-A" }, "Je n'ai pas bien compris.");
-            gather.say(
-                { language: "fr-FR", voice: "Google.fr-FR-Wavenet-A" },
+            sayFr(gather, "Je n'ai pas bien compris.");
+            sayFr(
+                gather,
                 `Vous pouvez me dire le premier pour ${formatSlotFR(a.start)}, le deuxième pour ${formatSlotFR(b.start)}, ou un autre jour.`
             );
-            gather.say({ language: "fr-FR", voice: "Google.fr-FR-Wavenet-A" }, prompt);
+            sayFr(gather, prompt);
 
             return sendTwiml(res, vr, callSid, session);
         }
@@ -770,6 +771,8 @@ async function handleModifyStep(ctx) {
             );
             return sendTwiml(res, vr, callSid, session);
         }
+
+        session.pendingSlot = null;
 
         return proposeSlotsFromRequestedDate({
             vr,

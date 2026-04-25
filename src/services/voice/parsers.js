@@ -130,8 +130,10 @@ function parseRequestedDate(text) {
     const raw = normalizeText(text);
     if (!raw) return null;
 
+    // ✅ PAR :
     const now = getParisNow();
-    const today = startOfDay(now);
+    const today = new Date(now);
+    today.setHours(0, 0, 0, 0);
 
     if (raw.includes("aujourd'hui") || raw.includes("aujourdhui")) {
         return buildDateKey(today);
@@ -652,10 +654,11 @@ function detectActionChoice(speech, digits) {
     if (digits === "3") return "CANCEL";
     if (digits === "4") return "INFO";
 
-    if (detectInfoIntent(t)) return "INFO";
+    // ✅ PAR :
     if (detectModifyIntent(t)) return "MODIFY";
     if (detectCancelIntent(t)) return "CANCEL";
     if (detectBookingIntent(t)) return "BOOK";
+    if (detectInfoIntent(t)) return "INFO";
 
     return null;
 }

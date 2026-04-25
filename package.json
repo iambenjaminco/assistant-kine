@@ -13,6 +13,7 @@
   "type": "commonjs",
   "dependencies": {
     "@google-cloud/local-auth": "^3.0.1",
+    "@sentry/node": "^10.50.0",
     "@supabase/supabase-js": "^2.103.0",
     "axios": "^1.13.5",
     "dotenv": "^17.3.1",

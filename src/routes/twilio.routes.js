@@ -154,7 +154,10 @@ const SAY_OPTS = {
 };
 
 function sayFr(node, text) {
-    const safeText = String(text || "").trim();
+    const safeText =
+        typeof text === "string" || typeof text === "number"
+            ? String(text).trim()
+            : "";
 
     if (process.env.NODE_ENV !== "production") {
         console.log("[TWILIO][TTS_DEBUG]", {
@@ -335,6 +338,7 @@ async function endCall(vr, res, callSid, session, reason, message = "", meta = {
 }
 
 async function sendTwiml(res, vr, callSid = null, session = null) {
+    // ✅ NOUVEAU BLOC — Redis lent ne plante plus l'appel
     if (callSid && session) {
         try {
             const saved = await saveSession(callSid, session);
@@ -346,6 +350,7 @@ async function sendTwiml(res, vr, callSid = null, session = null) {
                     reason: "SAVE_RETURNED_FALSE",
                     step: session?.step || null,
                 });
+                // On continue quand même — l'appel en cours reste fonctionnel
             }
         } catch (err) {
             logError("SESSION_SAVE_FAILED", {
@@ -354,8 +359,7 @@ async function sendTwiml(res, vr, callSid = null, session = null) {
                 message: err?.message,
                 step: session?.step || null,
             });
-
-            throw new Error("SESSION_SAVE_FAILED");
+            // On ne throw plus — un Redis lent ne doit pas planter le patient
         }
     }
 
@@ -432,7 +436,7 @@ function getTransferFallback(session, type) {
 }
 
 function askIfOtherQuestion(vr, session, intro = "") {
-    setPrompt(session, "Est-ce que vous avez d'autre question ?");
+    setPrompt(session, "Est-ce que vous avez d'autres questions ?");
 
     const gather = gatherSpeech(vr, "/twilio/voice");
 
@@ -537,11 +541,11 @@ function promptAndGatherDate(vr, session, prompt, intro = "") {
     const gather = gatherDateSpeech(vr, "/twilio/voice");
 
     if (intro) {
-        gather.say(SAY_OPTS, intro);
+        sayFr(gather, intro);
     }
 
     if (session.lastPrompt) {
-        gather.say(SAY_OPTS, session.lastPrompt);
+        sayFr(gather, session.lastPrompt);
     }
 
     return gather;
@@ -569,7 +573,7 @@ function getCabinetOrFail(vr, cabinet) {
     }
 
     if (!cabinet.practitioners || !Array.isArray(cabinet.practitioners) || !cabinet.practitioners.length) {
-        sayFr(vr, "Aucun praticien n’est configuré. Merci de rappeler le cabinet.");
+        sayFr(vr, "Aucun praticien n'est encore configuré. Merci de contacter le cabinet.");
         sayGoodbye(vr);
         return null;
     }
@@ -597,6 +601,7 @@ function getCabinetDurations(cabinet) {
 function buildInitialSession() {
     return {
         step: "ACTION",
+        cabinetId: null,
         slots: [],
         patientName: "",
         phone: "",
@@ -610,7 +615,6 @@ function buildInitialSession() {
         lastPrompt: "",
         variantCursor: {},
         actionAckOverride: "",
-
         initialBookingSpeech: "",
         appointmentType: null,
         appointmentDurationMinutes: null,
@@ -620,7 +624,6 @@ function buildInitialSession() {
         preferredTimeWindow: null,
         preferredHourMinutes: null,
         priorityPreference: null,
-
         lastProposedStartISO: null,
         requestedDateISO: null,
         lastIntentContext: null,
@@ -700,11 +703,23 @@ async function handleRetry(vr, res, session, callSid, cabinetId, reason = "UNKNO
         reason,
     });
 
-    if (session.retryCount >= 3) {
+    const MAX_RETRY_BY_STEP = {
+        ACTION: 3,
+        BOOK_PICK_SLOT: 2,
+        BOOK_PICK_ALT: 2,
+        BOOK_ASK_PHONE: 4,
+        MODIFY_ASK_PHONE: 4,
+        CANCEL_ASK_PHONE: 4,
+    };
+
+    const maxRetry = MAX_RETRY_BY_STEP[session.step] || 3;
+
+    if (session.retryCount >= maxRetry) {
         logWarn("CALL_ENDED_MISUNDERSTOOD", {
             callSid,
             step: session.step,
             reason,
+            maxRetry,
         });
 
         await trackFailedOnce(session, cabinetId);
@@ -715,11 +730,12 @@ async function handleRetry(vr, res, session, callSid, cabinetId, reason = "UNKNO
             callSid,
             session,
             "CALL_ENDED_MISUNDERSTOOD",
-            "Je n’arrive pas à comprendre votre réponse.",
+            "Je n’arrive pas à comprendre votre réponse. Merci de rappeler le cabinet si besoin.",
             {
                 failedStep: session.step,
                 reason,
                 retryCount: session.retryCount,
+                maxRetry,
             }
         );
     }
@@ -737,18 +753,12 @@ function askActionMenu(vr, session, intro = "") {
     });
 
     if (intro) {
-        gather.say(SAY_OPTS, intro);
+        sayFr(gather, intro);
     }
 
-    gather.say(
-        SAY_OPTS,
-        "Bonjour, je suis Mary, l'assistante du cabinet."
-    );
+    sayFr(gather, "Bonjour, je suis Mary, l'assistante du cabinet.");
+    sayFr(gather, session.lastPrompt);
 
-    gather.say(
-        SAY_OPTS,
-        "Voulez-vous prendre, modifier ou annuler un rendez-vous ? Vous pouvez aussi dire autre."
-    );
     return gather;
 }
 
@@ -844,14 +854,14 @@ function saySlotsOnNode(node, slots) {
 
     if (!a) return;
 
-    node.say(
-        SAY_OPTS,
+    sayFr(
+        node,
         `Je peux vous proposer ${formatSlotFR(a.start)}${a.practitionerName ? ` avec ${a.practitionerName}` : ""}.`
     );
 
     if (b && b.start !== a.start) {
-        node.say(
-            SAY_OPTS,
+        sayFr(
+            node,
             `Ou ${formatSlotFR(b.start)}${b.practitionerName ? ` avec ${b.practitionerName}` : ""}.`
         );
     }
@@ -1044,14 +1054,14 @@ async function proposeSlotsFromRequestedDate({
     const gather = gatherSpeech(vr, "/twilio/voice");
 
     if (status === "REQUESTED_TIME_TAKEN_SAME_DAY_ALTERNATIVES") {
-        gather.say(
-            SAY_OPTS,
+        sayFr(
+            gather,
             "Le créneau demandé n’est plus disponible, mais j’ai d’autres horaires le même jour."
         );
     }
 
     if (intro) {
-        gather.say(SAY_OPTS, intro);
+        sayFr(gather, intro);
     }
 
     const cleaned = cleanProposeSpeech(proposeSpeech);
@@ -1062,12 +1072,12 @@ async function proposeSlotsFromRequestedDate({
         !Number.isFinite(session.preferredHourMinutes) &&
         !session.priorityPreference
     ) {
-        gather.say(SAY_OPTS, cleaned);
+        sayFr(gather, cleaned);
     } else {
         saySlotsOnNode(gather, session.slots);
     }
 
-    gather.say(SAY_OPTS, prompt);
+    sayFr(gather, prompt);
 
     return sendTwiml(res, vr, callSid, session);
 }
@@ -1221,9 +1231,13 @@ async function proposeBookingSlots({
     const gather = gatherSpeech(vr, "/twilio/voice");
 
     if (session.preferredPractitioner?.name) {
-        gather.say(SAY_OPTS, `Je cherche avec ${session.preferredPractitioner.name}.`);
+        sayFr(gather, `Je cherche avec ${session.preferredPractitioner.name}.`);
     } else {
-        gather.say(SAY_OPTS, "Je regarde.");
+        sayFr(gather, pickVariant(session, "search", [
+            "Je regarde.",
+            "Je vérifie les disponibilités.",
+            "Un instant, je cherche."
+        ]));
     }
 
     const cleaned = cleanProposeSpeech(proposeSpeech);
@@ -1234,12 +1248,12 @@ async function proposeBookingSlots({
         !Number.isFinite(session.preferredHourMinutes) &&
         !session.priorityPreference
     ) {
-        gather.say(SAY_OPTS, cleaned);
+        sayFr(gather, cleaned);
     } else {
         saySlotsOnNode(gather, session.slots);
     }
 
-    gather.say(SAY_OPTS, prompt);
+    sayFr(gather, prompt);
 
     return sendTwiml(res, vr, callSid, session);
 }
@@ -1475,12 +1489,12 @@ async function finalizeBooking(vr, res, session, callSid, cabinet, cabinetId) {
 
     const gather = gatherSpeech(vr, "/twilio/voice");
 
-    gather.say(SAY_OPTS, statusMsg);
-    gather.say(SAY_OPTS, "Je peux vous proposer un autre créneau.");
+    sayFr(gather, statusMsg);
+    sayFr(gather, "Je peux vous proposer un autre créneau.");
 
     saySlotsOnNode(gather, session.slots);
 
-    gather.say(SAY_OPTS, prompt);
+    sayFr(gather, prompt);
 
     return sendTwiml(res, vr, callSid, session);
 }
@@ -1610,6 +1624,18 @@ router.post("/voice", async (req, res) => {
         const validatedCabinet = getCabinetOrFail(vr, cabinet);
         if (!validatedCabinet) {
             logError("CABINET_CONFIG_INVALID", { callSid, cabinetId, calledNumber });
+
+            await trackFailedOnce(session, cabinetId);
+            await trackDurationOnce(session, cabinetId);
+
+            logCallOutcome(
+                callSid,
+                "CABINET_CONFIG_INVALID",
+                session,
+                { cabinetId, calledNumber },
+                buildSessionSnapshot
+            );
+
             await clearSession(callSid);
             return sendTwiml(res, vr);
         }
@@ -1844,10 +1870,10 @@ router.post("/voice", async (req, res) => {
                     "Je n’ai pas bien compris. Dites prendre, modifier, annuler ou autre. Vous pouvez aussi taper 1, 2, 3 ou 4."
                 );
 
-                gather.say(SAY_OPTS, "Je n’ai pas bien compris.");
+                sayFr(gather, "Je n’ai pas bien compris.");
 
-                gather.say(
-                    SAY_OPTS,
+                sayFr(
+                    gather,
                     "Dites prendre, modifier, annuler ou autre. Vous pouvez aussi taper 1 pour prendre, 2 pour modifier, 3 pour annuler, 4 pour autre."
                 );
 
@@ -2193,7 +2219,7 @@ router.post("/voice", async (req, res) => {
                     promptAndGather(
                         vr,
                         session,
-                        "Je n’ai pas bien compris. Est-ce que vous avez d'autre question ? Répondez par oui ou par non."
+                        "Je n’ai pas bien compris. Est-ce que vous avez d'autres questions ? Répondez par oui ou par non."
                     );
                     return sendTwiml(res, vr, callSid, session);
                 }
@@ -2242,7 +2268,7 @@ router.post("/voice", async (req, res) => {
                 promptAndGather(
                     vr,
                     session,
-                    "Je n’ai pas bien compris. Est-ce que vous avez d'autre question ?"
+                    "Je n’ai pas bien compris. Est-ce que vous avez d'autres questions ?"
                 );
                 return sendTwiml(res, vr, callSid, session);
             }

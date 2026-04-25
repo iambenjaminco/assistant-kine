@@ -1,16 +1,86 @@
 const express = require("express");
 const Stripe = require("stripe");
-const {
-  upsertCabinet,
-  findCabinetByCustomerId,
-  findCabinetBySubscriptionId,
-} = require("../services/cabinetsStore");
+const supabase = require("../config/supabase");
 
 const router = express.Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 function getBaseUrl(req) {
   return process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+}
+
+async function createPendingCabinet({ cabinetId, email }) {
+  const payload = {
+    id: cabinetId,
+    email,
+    status: "pending_payment",
+    onboarding_completed: false,
+    subscription_status: "pending",
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from("cabinets")
+    .upsert(payload, { onConflict: "id" })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+async function updateCabinetById(cabinetId, updates) {
+  const { data, error } = await supabase
+    .from("cabinets")
+    .update({
+      ...updates,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", cabinetId)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+async function findCabinetBySubscriptionId(stripeSubscriptionId) {
+  const { data, error } = await supabase
+    .from("cabinets")
+    .select("*")
+    .eq("stripe_subscription_id", stripeSubscriptionId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+async function findCabinetByCustomerId(stripeCustomerId) {
+  const { data, error } = await supabase
+    .from("cabinets")
+    .select("*")
+    .eq("stripe_customer_id", stripeCustomerId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+async function saveStripeEvent(event) {
+  const { error } = await supabase.from("stripe_events").upsert(
+    {
+      stripe_event_id: event.id,
+      type: event.type,
+      payload_json: event,
+      status: "processed",
+      processed_at: new Date().toISOString(),
+    },
+    { onConflict: "stripe_event_id" }
+  );
+
+  if (error) {
+    throw error;
+  }
 }
 
 router.post("/create-checkout-session", async (req, res) => {
@@ -31,10 +101,7 @@ router.post("/create-checkout-session", async (req, res) => {
         .json({ error: "STRIPE_PRICE_MONTHLY_ID manquant" });
     }
 
-    upsertCabinet(cabinetId, {
-      email,
-      status: "pending_payment",
-    });
+    await createPendingCabinet({ cabinetId, email });
 
     const baseUrl = getBaseUrl(req);
 
@@ -49,6 +116,7 @@ router.post("/create-checkout-session", async (req, res) => {
       ],
       success_url: `${baseUrl}/stripe/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/stripe/cancel`,
+      client_reference_id: cabinetId,
       metadata: {
         cabinetId,
         customerEmail: email,
@@ -79,7 +147,7 @@ router.post("/create-checkout-session", async (req, res) => {
   }
 });
 
-router.post("/webhook", (req, res) => {
+async function handleWebhook(req, res) {
   const sig = req.headers["stripe-signature"];
 
   let event;
@@ -99,19 +167,21 @@ router.post("/webhook", (req, res) => {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object;
-        const cabinetId = session.metadata?.cabinetId;
+        const cabinetId =
+          session.metadata?.cabinetId || session.client_reference_id;
 
         if (cabinetId) {
-          const updated = upsertCabinet(cabinetId, {
+          const updated = await updateCabinetById(cabinetId, {
             email:
               session.metadata?.customerEmail ||
               session.customer_email ||
               null,
-            status: "active",
-            stripeCustomerId: session.customer || null,
-            stripeSubscriptionId: session.subscription || null,
-            stripeSubscriptionStatus: "active",
-            lastCheckoutSessionId: session.id,
+            status: "pending_setup",
+            stripe_customer_id: session.customer || null,
+            stripe_subscription_id: session.subscription || null,
+            stripe_subscription_status: "active",
+            subscription_status: "active",
+            last_checkout_session_id: session.id,
           });
 
           console.log("✅ Cabinet activé après checkout", {
@@ -126,40 +196,28 @@ router.post("/webhook", (req, res) => {
       case "invoice.paid": {
         const invoice = event.data.object;
 
-        const foundBySubscription = invoice.subscription
-          ? findCabinetBySubscriptionId(invoice.subscription)
-          : null;
-
-        const foundByCustomer =
-          !foundBySubscription && invoice.customer
-            ? findCabinetByCustomerId(invoice.customer)
-            : null;
-
-        const found = foundBySubscription || foundByCustomer;
+        const found =
+          (invoice.subscription &&
+            await findCabinetBySubscriptionId(invoice.subscription)) ||
+          (!invoice.subscription && invoice.customer
+            ? await findCabinetByCustomerId(invoice.customer)
+            : null);
 
         if (found) {
-          const updated = upsertCabinet(found.cabinetId, {
-            status: "active",
-            stripeCustomerId:
-              invoice.customer || found.cabinet.stripeCustomerId || null,
-            stripeSubscriptionId:
-              invoice.subscription ||
-              found.cabinet.stripeSubscriptionId ||
-              null,
-            stripeSubscriptionStatus:
-              found.cabinet.stripeSubscriptionStatus || "active",
-            lastPaidInvoiceId: invoice.id,
+          const updated = await updateCabinetById(found.id, {
+            status: found.onboarding_completed ? "active" : "pending_setup",
+            stripe_customer_id:
+              invoice.customer || found.stripe_customer_id || null,
+            stripe_subscription_id:
+              invoice.subscription || found.stripe_subscription_id || null,
+            stripe_subscription_status: "active",
+            subscription_status: "active",
+            last_paid_invoice_id: invoice.id,
           });
 
           console.log("✅ Paiement réussi, cabinet confirmé actif", {
-            cabinetId: found.cabinetId,
+            cabinetId: found.id,
             cabinet: updated,
-          });
-        } else {
-          console.log("ℹ️ Paiement reçu mais cabinet introuvable", {
-            invoiceId: invoice.id,
-            customerId: invoice.customer,
-            subscriptionId: invoice.subscription,
           });
         }
 
@@ -169,25 +227,23 @@ router.post("/webhook", (req, res) => {
       case "invoice.payment_failed": {
         const invoice = event.data.object;
 
-        const foundBySubscription = invoice.subscription
-          ? findCabinetBySubscriptionId(invoice.subscription)
-          : null;
-
-        const foundByCustomer =
-          !foundBySubscription && invoice.customer
-            ? findCabinetByCustomerId(invoice.customer)
-            : null;
-
-        const found = foundBySubscription || foundByCustomer;
+        const found =
+          (invoice.subscription &&
+            await findCabinetBySubscriptionId(invoice.subscription)) ||
+          (!invoice.subscription && invoice.customer
+            ? await findCabinetByCustomerId(invoice.customer)
+            : null);
 
         if (found) {
-          const updated = upsertCabinet(found.cabinetId, {
+          const updated = await updateCabinetById(found.id, {
             status: "inactive",
-            lastFailedInvoiceId: invoice.id,
+            stripe_subscription_status: "past_due",
+            subscription_status: "past_due",
+            last_failed_invoice_id: invoice.id,
           });
 
           console.log("❌ Paiement échoué, cabinet désactivé", {
-            cabinetId: found.cabinetId,
+            cabinetId: found.id,
             cabinet: updated,
           });
         }
@@ -198,16 +254,17 @@ router.post("/webhook", (req, res) => {
       case "customer.subscription.deleted": {
         const subscription = event.data.object;
 
-        const found = findCabinetBySubscriptionId(subscription.id);
+        const found = await findCabinetBySubscriptionId(subscription.id);
 
         if (found) {
-          const updated = upsertCabinet(found.cabinetId, {
+          const updated = await updateCabinetById(found.id, {
             status: "canceled",
-            stripeSubscriptionStatus: "canceled",
+            stripe_subscription_status: "canceled",
+            subscription_status: "canceled",
           });
 
           console.log("⛔ Abonnement supprimé, cabinet désactivé", {
-            cabinetId: found.cabinetId,
+            cabinetId: found.id,
             cabinet: updated,
           });
         }
@@ -218,16 +275,16 @@ router.post("/webhook", (req, res) => {
       case "customer.subscription.updated": {
         const subscription = event.data.object;
 
-        const found = findCabinetBySubscriptionId(subscription.id);
+        const found = await findCabinetBySubscriptionId(subscription.id);
 
         if (found) {
-          let nextStatus = found.cabinet.status;
+          let nextStatus = found.status;
 
           if (
             subscription.status === "active" ||
             subscription.status === "trialing"
           ) {
-            nextStatus = "active";
+            nextStatus = found.onboarding_completed ? "active" : "pending_setup";
           } else if (
             subscription.status === "past_due" ||
             subscription.status === "unpaid" ||
@@ -237,13 +294,14 @@ router.post("/webhook", (req, res) => {
             nextStatus = "inactive";
           }
 
-          const updated = upsertCabinet(found.cabinetId, {
+          const updated = await updateCabinetById(found.id, {
             status: nextStatus,
-            stripeSubscriptionStatus: subscription.status,
+            stripe_subscription_status: subscription.status,
+            subscription_status: subscription.status,
           });
 
           console.log("ℹ️ Abonnement mis à jour", {
-            cabinetId: found.cabinetId,
+            cabinetId: found.id,
             cabinet: updated,
             stripeStatus: subscription.status,
           });
@@ -256,12 +314,14 @@ router.post("/webhook", (req, res) => {
         console.log(`ℹ️ Événement non géré : ${event.type}`);
     }
 
+    await saveStripeEvent(event);
+
     return res.json({ received: true });
   } catch (err) {
     console.error("❌ Erreur traitement webhook Stripe :", err.message);
     return res.status(500).json({ error: "Erreur traitement webhook" });
   }
-});
+}
 
 router.get("/success", (req, res) => {
   res.send(`
@@ -272,10 +332,8 @@ router.get("/success", (req, res) => {
       <body style="font-family: Arial, sans-serif; padding: 40px; max-width: 720px; margin: auto; line-height: 1.6; color: #111;">
         <h1>Abonnement activé ✅</h1>
         <p>Votre paiement a bien été confirmé.</p>
-        <p>Votre cabinet est maintenant activé.</p>
         <p>La prochaine étape consiste à finaliser la configuration de votre assistant téléphonique.</p>
-        <p>Nous vous recontacterons très prochainement pour la mise en place.</p>
-        <p>Vous pouvez fermer cette page.</p>
+        <p>Vous pouvez maintenant poursuivre l'onboarding.</p>
       </body>
     </html>
   `);
@@ -297,3 +355,4 @@ router.get("/cancel", (req, res) => {
 });
 
 module.exports = router;
+module.exports.handleWebhook = handleWebhook;

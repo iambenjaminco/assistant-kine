@@ -48,6 +48,7 @@ async function handleCancelStep(ctx) {
         markProcessedAction,
         logInfo,
         logWarn,
+        logError,
         sendSmsWithLogging,
         sendAppointmentCancelledSMS,
         incrementMetric,
@@ -180,8 +181,8 @@ async function handleCancelStep(ctx) {
         setPrompt(session, prompt);
 
         const gather = gatherSpeech(vr, "/twilio/voice");
-        gather.say(SAY_OPTS, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
-        gather.say(SAY_OPTS, prompt);
+        sayFr(gather, `J’ai trouvé un rendez-vous le ${formatSlotFR(found.startISO)}.`);
+        sayFr(gather, prompt);
 
         return sendTwiml(res, vr, callSid, session);
     }
@@ -380,23 +381,25 @@ async function handleCancelStep(ctx) {
         setPrompt(session, prompt);
 
         const gather = gatherSpeech(vr, "/twilio/voice");
-        gather.say(SAY_OPTS, "Votre rendez-vous est annulé.");
-        gather.say(SAY_OPTS, prompt);
+        sayFr(gather, "Votre rendez-vous est annulé.");
+        sayFr(gather, prompt);
 
         return sendTwiml(res, vr, callSid, session);
     }
 
     if (session.step === "CANCEL_ASK_REBOOK") {
         const yesNo = parseYesNo(speech);
+        const normalizedSpeech = normalizeText(speech);
+
         const wantsBook =
-            speech &&
+            normalizedSpeech &&
             (
-                normalizeText(speech).includes("prendre") ||
-                normalizeText(speech).includes("reprendre") ||
-                normalizeText(speech).includes("reserver") ||
-                normalizeText(speech).includes("booker") ||
-                normalizeText(speech).includes("rendez") ||
-                normalizeText(speech).includes("rdv")
+                normalizedSpeech.includes("prendre") ||
+                normalizedSpeech.includes("reprendre") ||
+                normalizedSpeech.includes("reserver") ||
+                normalizedSpeech.includes("booker") ||
+                normalizedSpeech.includes("rendez") ||
+                normalizedSpeech.includes("rdv")
             );
 
         if (yesNo === null && !wantsBook) {
@@ -429,6 +432,8 @@ async function handleCancelStep(ctx) {
             );
         }
 
+        // ✅ PAR :
+        await trackDurationOnce(session, cabinetId);
         resetBookingFlowState(session, { keepIdentity: true });
         session.lastIntentContext = "BOOK";
         session.phonePurpose = "BOOK";

@@ -470,6 +470,10 @@ async function handleBookStep(ctx) {
             });
         }
 
+        // ✅ PAR :
+        const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_NO_SLOT_WITH_PRACTITIONER");
+        if (retry) return retry;
+
         promptAndGather(
             vr,
             session,
@@ -480,7 +484,7 @@ async function handleBookStep(ctx) {
 
     if (session.step === "BOOK_PICK_SLOT") {
         const t = normalizeText(speech);
-        const requestedDateISO = parseRequestedDate(speech) || parseRequestedDate(t);
+        const requestedDateISO = parseRequestedDate(speech);
 
         const wantsRepeat =
             t.includes("repete") ||
@@ -507,6 +511,7 @@ async function handleBookStep(ctx) {
         }
 
         if (requestedDateISO) {
+            session.pendingSlot = null;
             return proposeSlotsFromRequestedDate({
                 vr,
                 res,
@@ -627,6 +632,11 @@ async function handleBookStep(ctx) {
         }
 
         session.pendingSlot = slot;
+        ctx.logInfo?.("BOOK_SLOT_SELECTED", {
+            callSid,
+            cabinetId,
+            slot: summarizeSlot(slot),
+        });
         setStep(session, callSid, "BOOK_ASK_NAME", {
             trigger: "SLOT_SELECTED",
             selectedSlot: summarizeSlot(slot),
@@ -670,6 +680,8 @@ async function handleBookStep(ctx) {
             return sendTwiml(res, vr, callSid, session);
         }
 
+        session.pendingSlot = null;
+
         return proposeSlotsFromRequestedDate({
             vr,
             res,
@@ -684,7 +696,7 @@ async function handleBookStep(ctx) {
     }
 
     if (session.step === "BOOK_ASK_NAME") {
-        const name = (speech || "").trim();
+        const name = (speech || "").replace(/\s+/g, " ").trim();
 
         if (!isLikelyValidPatientName(name)) {
             const retry = await handleRetry(vr, res, session, callSid, cabinetId, "BOOK_ASK_NAME");
@@ -777,9 +789,10 @@ async function handleBookStep(ctx) {
 
     if (session.step === "BOOK_PICK_ALT") {
         const t = normalizeText(speech);
-        const requestedDateISO = parseRequestedDate(speech) || parseRequestedDate(t);
+        const requestedDateISO = parseRequestedDate(speech);
 
         if (requestedDateISO) {
+            session.pendingSlot = null;
             return proposeSlotsFromRequestedDate({
                 vr,
                 res,
@@ -900,6 +913,11 @@ async function handleBookStep(ctx) {
         }
 
         session.pendingSlot = slot;
+        ctx.logInfo?.("BOOK_ALT_SLOT_SELECTED", {
+            callSid,
+            cabinetId,
+            slot: summarizeSlot(slot),
+        });
         return finalizeBooking(vr, res, session, callSid, activeCabinet, cabinetId);
     }
 
