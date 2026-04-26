@@ -440,7 +440,7 @@ async function handleCancelStep(ctx) {
         session.lastIntentContext = "BOOK";
         session.phonePurpose = "BOOK";
         session.initialBookingSpeech = "";
-        session.actionAckOverride = "Très bien.";
+        session.actionAckOverride = pickVariant(session, "rebook_ack", ["Très bien.", "Parfait.", "D'accord.", "Entendu."]);
         setStep(session, callSid, "BOOK_WELCOME", { trigger: "ACTION_BOOK" });
         setPrompt(session, "");
         vr.redirect({ method: "POST" }, "/twilio/voice");

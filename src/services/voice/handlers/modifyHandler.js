@@ -72,6 +72,7 @@ async function handleModifyStep(ctx) {
         sendSmsWithLogging,
         sendAppointmentModifiedSMS,
         promptAndGatherDate,
+        pickVariant,
     } = ctx;
 
     if (session.step === "MODIFY_ASK_PHONE") {
@@ -135,6 +136,7 @@ async function handleModifyStep(ctx) {
             return sendTwiml(res, vr, callSid, session);
         }
 
+        // ✅ PAR :
         session.phone = session.phoneCandidate;
         session.phoneCandidate = "";
         setStep(session, callSid, "MODIFY_FIND_APPT", {
@@ -143,6 +145,7 @@ async function handleModifyStep(ctx) {
         });
         session.lastIntentContext = "MODIFY";
         setPrompt(session, "");
+        sayFr(vr, "Très bien, je recherche votre rendez-vous. Veuillez patienter un instant.");
         vr.redirect({ method: "POST" }, "/twilio/voice");
         return sendTwiml(res, vr, callSid, session);
     }
@@ -439,7 +442,8 @@ async function handleModifyStep(ctx) {
 
         const gather = gatherSpeech(vr, "/twilio/voice");
 
-        sayFr(gather, "Très bien.");
+        // ✅ PAR :
+        sayFr(gather, pickVariant(session, "modify_ack", ["Très bien.", "Parfait.", "D'accord.", "Entendu.", "Je regarde."]));
 
         if (usedAnyPractitionerFallback) {
             sayFr(
