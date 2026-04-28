@@ -175,7 +175,9 @@ function gatherSpeech(vr, actionUrl, overrides = {}) {
     return vr.gather({
         input: "speech dtmf",
         language: "fr-FR",
+        // ✅ PAR :
         speechModel: "phone_call",
+        enhanced: true,
         speechTimeout: 1,
         timeout: 8,
         actionOnEmptyResult: true,
