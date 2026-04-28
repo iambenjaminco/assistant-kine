@@ -281,6 +281,7 @@ function detectTimePreference(text) {
         return "LATE_MORNING";
     }
 
+    // ✅ PAR :
     if (
         t.includes("fin d'apres midi") ||
         t.includes("fin dapres midi") ||
@@ -291,7 +292,15 @@ function detectTimePreference(text) {
         t.includes("fin d'aprem") ||
         t.includes("fin daprem") ||
         t.includes("fin d aprem") ||
-        t.includes("apres le travail")
+        t.includes("apres le travail") ||
+        t.includes("fin apres midi") ||
+        t.includes("fin apres-midi") ||
+        t.includes("tard dans l'apres midi") ||
+        t.includes("en fin de journee") ||
+        t.includes("vers 17h") ||
+        t.includes("vers 18h") ||
+        t.includes("17h") ||
+        t.includes("18h")
     ) {
         return "LATE_AFTERNOON";
     }
@@ -314,9 +323,19 @@ function detectTimePreference(text) {
         return "EVENING";
     }
 
-    if (t.includes("matin") || t.includes("matinee") || t.includes("matine")) {
+    // ✅ PAR :
+    if (
+        t.includes("matin") ||
+        t.includes("matinee") ||
+        t.includes("matine") ||
+        t.includes("matinal") ||
+        t.includes("le matin") ||
+        t.includes("dans la matinee") ||
+        t.includes("dans la matinee")
+    ) {
         return "MORNING";
     }
+
 
     if (
         t.includes("apres midi") ||

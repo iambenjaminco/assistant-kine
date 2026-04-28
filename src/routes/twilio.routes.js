@@ -748,6 +748,7 @@ function askActionMenu(vr, session, intro = "") {
     setPrompt(session, prompt);
 
     const gather = gatherSpeech(vr, "/twilio/voice", {
+        interruptOnSpeech: false,
         hints:
             "prendre rendez-vous, prendre, reprendre rendez-vous, reserver un rendez-vous, booker un rendez-vous, modifier rendez-vous, changer rendez-vous, deplacer rendez-vous, reporter rendez-vous, annuler rendez-vous, supprimer rendez-vous, autre, autre demande, autre chose, urgence, question, adresse, horaires, horaire, ouverture, fermeture, ouvert, ferme, localisation, ou se trouve le cabinet, matin, debut de matinee, fin de matinee, apres-midi, debut d'apres-midi, debut d'apres midi, fin d'apres-midi, fin d'apres midi, soir, midi, midi et demi, midi trente, minuit, oui, non, demain, lundi, mardi, mercredi, jeudi, vendredi, samedi, Benjamin, Lisa, peu importe, peu importe le jour, n'importe quel jour, suivi, premier rendez-vous, 12h, 12 heures, 12h30, 17h, 17 heures, 17h30, 18h, 18 heures, 18h30, 19h, 20h, 20 heures, vers 12h, vers 12h30, vers 17h, vers 18h, le plus tot possible, au plus vite, le plus tard possible, n'importe quand, dans la journee, 1, 2, 3, 4",
     });
@@ -1258,7 +1259,9 @@ async function proposeBookingSlots({
     return sendTwiml(res, vr, callSid, session);
 }
 
-function goToBookingPreferredDate(session, callSid, promptIntro = "Très bien.") {
+// ✅ REMPLACE PAR :
+function goToBookingPreferredDate(session, callSid, promptIntro = null) {
+    promptIntro = promptIntro || pickVariant(session, "ack", ["Très bien.", "Parfait.", "D'accord.", "Entendu.", "C'est noté."]);
     session.slots = [];
     session.pendingSlot = null;
     session.requestedDateISO = null;
@@ -1272,6 +1275,7 @@ function goToBookingPreferredDate(session, callSid, promptIntro = "Très bien.")
     return promptIntro;
 }
 
+// ✅ REMPLACE :
 async function continueBookingAfterPractitionerSelection({
     vr,
     res,
@@ -1279,8 +1283,10 @@ async function continueBookingAfterPractitionerSelection({
     callSid,
     cabinet,
     speech = "",
-    intro = "Très bien.",
+    intro = null,
 }) {
+    if (!intro) intro = pickVariant(session, "ack", ["Très bien.", "Parfait.", "D'accord.", "Entendu.", "C'est noté."]);
+
     const requestedDateISO = parseRequestedDate(speech);
 
     if (requestedDateISO) {
@@ -1812,7 +1818,7 @@ router.post("/voice", async (req, res) => {
                         vr,
                         session,
                         "S'agit-il d'une urgence ou d'une demande d'information ?",
-                        "Très bien."
+                        pickVariant(session, "ack", ["Très bien.", "Parfait.", "D'accord.", "Entendu.", "C'est noté."])
                     );
                     return sendTwiml(res, vr, callSid, session);
                 }
@@ -1826,7 +1832,7 @@ router.post("/voice", async (req, res) => {
                         vr,
                         session,
                         "Quel est votre numéro de téléphone ?",
-                        "Très bien."
+                        pickVariant(session, "ack", ["Très bien.", "Parfait.", "D'accord.", "Entendu.", "C'est noté."])
                     );
                     return sendTwiml(res, vr, callSid, session);
                 }
@@ -1840,7 +1846,7 @@ router.post("/voice", async (req, res) => {
                         vr,
                         session,
                         "Quel est votre numéro de téléphone ?",
-                        "Très bien."
+                        pickVariant(session, "ack", ["Très bien.", "Parfait.", "D'accord.", "Entendu.", "C'est noté."])
                     );
                     return sendTwiml(res, vr, callSid, session);
                 }
@@ -1850,7 +1856,7 @@ router.post("/voice", async (req, res) => {
                     session.lastIntentContext = "BOOK";
                     session.initialBookingSpeech = speech || "";
                     session.phonePurpose = "BOOK";
-                    session.actionAckOverride = "Très bien.";
+                    session.actionAckOverride = pickVariant(session, "ack", ["Très bien.", "Parfait.", "D'accord.", "Entendu.", "C'est noté."])
                     setStep(session, callSid, "BOOK_WELCOME", { trigger: "ACTION_BOOK" });
                     setPrompt(session, "");
                     vr.redirect({ method: "POST" }, "/twilio/voice");
