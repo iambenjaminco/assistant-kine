@@ -1379,6 +1379,7 @@ async function getBusyPeriods(cabinet, practitioner, timeMin, timeMax, timezone)
 
         calendar = result.calendar;
         connection = result.connection;
+        // ✅ PAR :
     } catch (err) {
         if (err?.code === "PRACTITIONER_GOOGLE_CONNECTION_NOT_FOUND") {
             console.warn("[CALENDAR][PRACTITIONER_SKIPPED_NO_GOOGLE_CONNECTION]", {
@@ -1392,6 +1393,26 @@ async function getBusyPeriods(cabinet, practitioner, timeMin, timeMax, timezone)
                 busy: [],
                 skipped: true,
                 skipReason: "PRACTITIONER_GOOGLE_CONNECTION_NOT_FOUND",
+            };
+        }
+
+        // ✅ Token Google expiré ou révoqué
+        const isInvalidGrant =
+            err?.message?.includes("invalid_grant") ||
+            err?.response?.data?.error === "invalid_grant";
+
+        if (isInvalidGrant) {
+            console.error("[CALENDAR][PRACTITIONER_TOKEN_INVALID_GRANT]", {
+                cabinetKey: cabinet?.key || null,
+                practitionerName: practitioner?.name || null,
+                message: err?.message,
+            });
+
+            return {
+                calendarId: null,
+                busy: [],
+                skipped: true,
+                skipReason: "INVALID_GRANT_TOKEN_EXPIRED",
             };
         }
 
