@@ -431,7 +431,8 @@ function updateTimePreferenceFromSpeech(session, text, { clearOnExplicitNone = f
         return;
     }
 
-    if (Number.isFinite(explicitHour)) {
+    // ✅ PAR :
+    if (Number.isFinite(explicitHour) && !detectedTimeWindow) {
         session.preferredHourMinutes = explicitHour;
         session.preferredTimeWindow = inferTimeWindowFromHourMinutes(explicitHour);
         session.priorityPreference = null;
