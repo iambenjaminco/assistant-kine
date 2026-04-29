@@ -53,21 +53,25 @@ app.use(express.json());
 // Routes principales
 app.use("/api/calendar", calendarRoutes);
 
+// ✅ Validation signature Twilio — version finale IE1
 app.use("/twilio", (req, res, next) => {
   const twilioSignature = req.headers["x-twilio-signature"];
+  const url = `https://${req.headers["host"]}${req.originalUrl}`;
   const params = req.body || {};
 
-  // Log complet pour debug
-  console.log("[TWILIO][SIGNATURE_DEBUG]", {
-    signature: twilioSignature,
-    originalUrl: req.originalUrl,
-    host: req.headers["host"],
-    proto: req.headers["x-forwarded-proto"],
-    appBaseUrl: process.env.APP_BASE_URL,
-    bodyKeys: Object.keys(params).slice(0, 5),
-  });
+  const isValid = twilio.validateRequest(
+    process.env.TWILIO_AUTH_TOKEN,
+    twilioSignature,
+    url,
+    params
+  );
 
-  next(); // On laisse passer pour l'instant
+  if (!isValid) {
+    console.warn("[TWILIO][INVALID_SIGNATURE]", { url, signature: twilioSignature });
+    return res.status(403).send("Forbidden");
+  }
+
+  next();
 });
 
 app.use("/twilio", twilioRoutes);
