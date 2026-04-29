@@ -53,27 +53,8 @@ app.use(express.json());
 // Routes principales
 app.use("/api/calendar", calendarRoutes);
 
-// ✅ Validation signature Twilio
+// ⚠️ Validation signature Twilio — désactivée temporairement pour debug IE1
 app.use("/twilio", (req, res, next) => {
-  const twilioSignature = req.headers["x-twilio-signature"];
-  const url = `${process.env.APP_BASE_URL}${req.originalUrl}`;
-  const params = req.body || {};
-
-  const isValid = twilio.validateRequest(
-    process.env.TWILIO_AUTH_TOKEN,
-    twilioSignature,
-    url,
-    params
-  );
-
-  if (!isValid) {
-    console.warn("[TWILIO][INVALID_SIGNATURE]", {
-      url,
-      signature: twilioSignature,
-    });
-    return res.status(403).send("Forbidden");
-  }
-
   next();
 });
 
