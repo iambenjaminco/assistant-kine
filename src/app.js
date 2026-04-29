@@ -53,8 +53,42 @@ app.use(express.json());
 // Routes principales
 app.use("/api/calendar", calendarRoutes);
 
-// ⚠️ Validation signature Twilio — désactivée temporairement pour debug IE1
+// ✅ Validation signature Twilio — version IE1 compatible
 app.use("/twilio", (req, res, next) => {
+  const twilioSignature = req.headers["x-twilio-signature"];
+  const params = req.body || {};
+
+  // Twilio IE1 peut envoyer l'URL avec ou sans port, on teste les deux
+  const urlBase = `${process.env.APP_BASE_URL}${req.originalUrl}`;
+  const urlForwarded = req.headers["x-forwarded-proto"]
+    ? `${req.headers["x-forwarded-proto"]}://${req.headers["host"]}${req.originalUrl}`
+    : null;
+
+  const isValidBase = twilio.validateRequest(
+    process.env.TWILIO_AUTH_TOKEN,
+    twilioSignature,
+    urlBase,
+    params
+  );
+
+  const isValidForwarded = urlForwarded
+    ? twilio.validateRequest(
+      process.env.TWILIO_AUTH_TOKEN,
+      twilioSignature,
+      urlForwarded,
+      params
+    )
+    : false;
+
+  if (!isValidBase && !isValidForwarded) {
+    console.warn("[TWILIO][INVALID_SIGNATURE]", {
+      urlBase,
+      urlForwarded,
+      signature: twilioSignature,
+    });
+    return res.status(403).send("Forbidden");
+  }
+
   next();
 });
 
