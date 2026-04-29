@@ -1875,14 +1875,14 @@ router.post("/voice", async (req, res) => {
 
                 setPrompt(
                     session,
-                    "Je n’ai pas bien compris. Dites prendre, modifier, annuler ou autre. Vous pouvez aussi taper 1, 2, 3 ou 4."
+                    "Je n’ai pas bien compris. Dites prendre, modifier, annuler ou autre."
                 );
 
                 sayFr(gather, "Je n’ai pas bien compris.");
 
                 sayFr(
                     gather,
-                    "Dites prendre, modifier, annuler ou autre. Vous pouvez aussi taper 1 pour prendre, 2 pour modifier, 3 pour annuler, 4 pour autre."
+                    "Dites prendre, modifier, annuler ou autre."
                 );
 
                 return sendTwiml(res, vr, callSid, session);

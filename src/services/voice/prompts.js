@@ -61,10 +61,11 @@ function getNoInputIntro(step) {
     }
 }
 
+// ✅ PAR :
 function getActionPrompt(PHRASES) {
     return (
         PHRASES.askAction ||
-        "Souhaitez-vous prendre, modifier ou annuler un rendez-vous, ou obtenir une information ?"
+        "Souhaitez-vous prendre, modifier ou annuler un rendez-vous ? Vous pouvez aussi dire autre pour joindre le cabinet."
     );
 }
 
