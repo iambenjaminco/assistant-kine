@@ -759,8 +759,8 @@ function askActionMenu(vr, session, intro = "") {
         sayFr(gather, intro);
     }
 
-    sayFr(gather, "Bonjour, je suis Mary, l'assistante du cabinet.");
-    sayFr(gather, session.lastPrompt);
+    // ✅ PAR :
+    sayFr(gather, `Bonjour, je suis Mary, l'assistante du cabinet. ${session.lastPrompt}`);
 
     return gather;
 }
