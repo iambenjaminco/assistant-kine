@@ -2088,6 +2088,7 @@ async function suggestTwoSlotsFromDate({
         const requestedStartMinutes = targetHourMinutes;
         const requestedEndMinutes = targetHourMinutes + slotMinutes;
 
+        // ✅ PAR :
         if (
             !isWithinRangesByMinutes(
                 requestedStartMinutes,
@@ -2095,6 +2096,32 @@ async function suggestTwoSlotsFromDate({
                 dayAvailability.ranges
             )
         ) {
+            // Si timePreference est défini, on utilise son startMinutes comme fallback
+            // au lieu de dire "fermé"
+            if (timePreference && sameDayAvailableAll.length) {
+                const sameDayPreferred = sortSameDayAlternatives({
+                    slots: sameDayAvailableAll,
+                    targetHourMinutes: getTimePreferenceRule(timePreference)?.startMinutes || targetHourMinutes,
+                    timezone,
+                    maxSuggestions: effectiveMaxSuggestions,
+                });
+
+                return buildSuggestResponse({
+                    status: "SAME_DAY_ALTERNATIVES",
+                    slots: sameDayPreferred,
+                    speech: buildSlotSpeech(sameDayPreferred, {
+                        timePreference,
+                        targetHourMinutes,
+                        timezone,
+                    }),
+                    context: {
+                        cabinetKey: cabinet?.key || null,
+                        timezone,
+                        requestedDateKey,
+                    },
+                });
+            }
+
             const sameDayAlternatives = sortSameDayAlternatives({
                 slots: sameDayAvailableAll,
                 targetHourMinutes,
