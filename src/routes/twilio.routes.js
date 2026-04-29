@@ -2071,37 +2071,24 @@ router.post("/voice", async (req, res) => {
                 }
             }
 
+            // ✅ PAR :
             if (session.step === "OTHER_ROUTER") {
-                if (detectUrgencyRequest(speech)) {
-                    setStep(session, callSid, "TRANSFER_TO_CABINET", {
-                        trigger: "OTHER_URGENT",
-                    });
-
-                    return tryTransferToCabinet({
-                        vr,
-                        res,
-                        session,
-                        callSid,
-                        cabinetId,
-                        cabinet: activeCabinet,
-                        intro: "Je vous transfère immédiatement au cabinet.",
-                        fallbackType: "UNAVAILABLE",
-                        endReason: "TRANSFER_FAILED",
-                        meta: { fromStep: "OTHER_ROUTER" },
-                    });
-                }
-
-                setStep(session, callSid, "OTHER_ASK", {
-                    trigger: "OTHER_NEEDS_DETAILS",
+                setStep(session, callSid, "TRANSFER_TO_CABINET", {
+                    trigger: "OTHER_DIRECT_TRANSFER",
                 });
 
-                promptAndGather(
+                return tryTransferToCabinet({
                     vr,
+                    res,
                     session,
-                    "Quelle est votre demande ?",
-                    "D'accord."
-                );
-                return sendTwiml(res, vr, callSid, session);
+                    callSid,
+                    cabinetId,
+                    cabinet: activeCabinet,
+                    intro: "Je vous transfère au cabinet.",
+                    fallbackType: "UNAVAILABLE",
+                    endReason: "TRANSFER_FAILED",
+                    meta: { fromStep: "OTHER_ROUTER" },
+                });
             }
 
             if (session.step === "OTHER_ASK") {
