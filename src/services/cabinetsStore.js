@@ -13,6 +13,13 @@ function mapDbCabinetToApp(row) {
     key: row.id,
     id: row.id,
     name: row.name || "",
+
+    displayName: row.display_name || row.name || "",
+    assistantName: row.assistant_name || "Marie",
+    appointmentLabel: row.appointment_label || "santé",
+    smsSignature: row.sms_signature || row.name || "",
+    vapiAssistantId: row.vapi_assistant_id || null,
+
     status: row.status || null,
     timezone: row.timezone || "Europe/Paris",
 
