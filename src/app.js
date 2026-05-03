@@ -15,6 +15,7 @@ const twilioRoutes = require("./routes/twilio.routes");
 const stripeRoutes = require("./routes/stripe.routes");
 const redis = require("./config/redis");
 const googleOAuthRoutes = require("./routes/googleOAuth.routes");
+const vapiRoutes = require("./routes/vapi.routes");
 
 const app = express();
 
@@ -74,6 +75,7 @@ app.use("/twilio", (req, res, next) => {
 app.use("/twilio", twilioRoutes);
 app.use("/stripe", stripeRoutes);
 app.use("/auth/google", googleOAuthRoutes);
+app.use("/", vapiRoutes);
 
 // ✅ SENTRY — après toutes les routes
 Sentry.setupExpressErrorHandler(app);
